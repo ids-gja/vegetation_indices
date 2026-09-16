@@ -7,7 +7,7 @@ name = "ids-greenview-pro"
 version = "2.8.0"
 description = "Live RAW, NDVI, CVI, and TVI visualization for IDS cameras"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "matplotlib",
     "numpy",
@@ -25,5 +25,6 @@ where = ["src"]
 greenview_pro = [
     "assets/icons/*.png",
     "assets/images/*.jpg",
-    "config/*.txt",
+    "config/*.toml",
+    "config/messages/*.toml",
 ]

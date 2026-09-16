@@ -1,0 +1,14 @@
+title = "SEE THE DIFFERENCE"
+subtitle = "Natural vegetation and artificial grass appear similar in the visible image."
+
+[[facts]]
+title = "RGB IMAGE"
+detail = "Plant and artificial grass look alike"
+
+[[facts]]
+title = "NDVI IMAGE"
+detail = "Living vegetation becomes immediately visible"
+
+[[facts]]
+title = "INSTANT CONTRAST"
+detail = "Spectral information reveals the difference"

@@ -3,6 +3,7 @@
 
 import sys
 import time
+import tomllib
 from threading import Lock
 from datetime import datetime
 from pathlib import Path
@@ -11,7 +12,7 @@ import cv2
 import matplotlib
 import numpy as np
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot, QSize, QPropertyAnimation, QParallelAnimationGroup, QEasingCurve
-from PySide6.QtGui import QCloseEvent, QFont, QIcon, QImage, QPixmap
+from PySide6.QtGui import QColor, QCloseEvent, QFont, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow, QStackedWidget, QGraphicsOpacityEffect, QSizePolicy,
     QMessageBox, QPushButton, QSlider, QToolButton, QVBoxLayout, QWidget,
@@ -26,7 +27,8 @@ PROJECT_ROOT = BASE_DIR.parent.parent
 ICON_DIR = BASE_DIR / "assets" / "icons"
 SNAPSHOT_DIR = PROJECT_ROOT / "snapshots"
 COLOR_IMAGE_FILE = BASE_DIR / "assets" / "images" / "color_image.jpg"
-MARKETING_FILE = BASE_DIR / "config" / "marketing_messages_ndvi_v1_1.txt"
+CONFIG_FILE = BASE_DIR / "config" / "config.toml"
+MESSAGES_DIR = BASE_DIR / "config" / "messages"
 GUI_INTERVAL_MS = 66
 LOW_DEFAULT = 5
 HIGH_DEFAULT = 99
@@ -73,13 +75,6 @@ def preview_size(height, width):
     scale = np.sqrt(PREVIEW_MAX_PIXELS / pixels)
     return max(1, int(width * scale)), max(1, int(height * scale))
 
-
-def center_crop_16_9(image):
-    if image is None: return None
-    h,w=image.shape[:2]; target=16/9; current=w/max(h,1)
-    if current>target:
-        nw=max(1,int(round(h*target))); x=(w-nw)//2; return image[:,x:x+nw]
-    nh=max(1,int(round(w/target))); y=(h-nh)//2; return image[y:y+nh,:]
 
 def normalize_with_bounds(image, lo, hi):
     if hi <= lo:return np.zeros_like(image,dtype=np.float32)
@@ -303,10 +298,7 @@ class CameraWorker(QThread):
             else cv2.convertScaleAbs(raw_preview, alpha=255 / maximum)
         )
         raw_bgr = cv2.cvtColor(raw8, cv2.COLOR_GRAY2BGR)
-        return tuple(
-            np.ascontiguousarray(center_crop_16_9(image))
-            for image in (raw_bgr, ndvi, cvi)
-        )
+        return raw_bgr, ndvi, cvi
     def latest(self):
         with self._latest_lock:return self._latest,self._latest_version
     def run(self):
@@ -379,12 +371,65 @@ class ImageCard(QFrame):
     IMAGE_MARGIN=12
     def __init__(self,title,subtitle="",smooth=True):
         super().__init__();self.setObjectName("imageCard");layout=QVBoxLayout(self);layout.setContentsMargins(0,0,0,0);self.image=QLabel("Waiting for image...");self.image.setObjectName("imageArea");self.image.setAlignment(Qt.AlignCenter);self.image.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Ignored);self.image.setMinimumSize(0,0);layout.addWidget(self.image,1);self.overlay=QLabel(title,self);self.overlay.setObjectName("imageOverlay");self.overlay.setAttribute(Qt.WA_TransparentForMouseEvents,True);self._array=None;self._smooth=smooth
-    def set_image(self,array):self._array=np.ascontiguousarray(center_crop_16_9(array));self._refresh()
+    def set_image(self,array):self._array=np.ascontiguousarray(array);self._refresh()
     def clear_image(self):self._array=None;self.image.setPixmap(QPixmap());self.image.setText("Waiting for image...");self.overlay.hide()
     def _refresh(self):
         if self._array is None or self.image.width()<2 or self.image.height()<2:return
         h,w=self._array.shape[:2];q=QImage(self._array.data,w,h,self._array.strides[0],QImage.Format_BGR888);mode=Qt.SmoothTransformation if self._smooth else Qt.FastTransformation;pix=QPixmap.fromImage(q).scaled(self.image.size(),Qt.KeepAspectRatio,mode);self.image.setPixmap(pix);self.image.setText("");pos=self.image.mapTo(self,self.image.rect().topLeft());xo=max(0,(self.image.width()-pix.width())//2);yo=max(0,(self.image.height()-pix.height())//2);self.overlay.adjustSize();self.overlay.move(pos.x()+xo+self.IMAGE_MARGIN,pos.y()+yo+self.IMAGE_MARGIN);self.overlay.show();self.overlay.raise_()
     def resizeEvent(self,e):super().resizeEvent(e);self._refresh()
+
+
+class FocusedViewLayout(QGridLayout):
+    def __init__(self, cards, spacing):
+        super().__init__()
+        self._cards = cards
+        self._focus_index = 0
+        self.setContentsMargins(spacing, spacing, spacing, spacing)
+        self.setSpacing(spacing)
+        self.set_focus(0)
+
+    def set_focus(self, index):
+        self._focus_index = index % len(self._cards)
+        while self.count():
+            self.takeAt(0)
+        self.addWidget(self._cards[self._focus_index], 0, 0, 3, 1)
+        side_cards = (
+            card for card_index, card in enumerate(self._cards)
+            if card_index != self._focus_index
+        )
+        for row, card in enumerate(side_cards):
+            self.addWidget(card, row, 1)
+        self.setColumnStretch(0, 4)
+        self.setColumnStretch(1, 1)
+        for row in range(3):
+            self.setRowStretch(row, 1)
+
+
+class MessageProgressIndicator(QWidget):
+    def __init__(self, color, parent=None):
+        super().__init__(parent)
+        self._color = QColor(color)
+        self._progress = 0.0
+        self.setFixedSize(30, 30)
+
+    def set_progress(self, progress):
+        progress = max(0.0, min(1.0, progress))
+        if progress != self._progress:
+            self._progress = progress
+            self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(2, 2, -2, -2)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._color)
+        painter.drawPie(rect, 90 * 16, -round(360 * 16 * self._progress))
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(self._color)
+        painter.drawEllipse(rect)
+
+
 class PercentControl(QFrame):
     changed = Signal(int)
     def __init__(self, value, minimum, maximum):
@@ -439,9 +484,11 @@ class MainWindow(QMainWindow):
         self._last_images = None
         self._last_gui_version = -1
         self._marketing_index = 0
+        self._active_view_index = 0
         self._animation = None
+        self._message_started_at = None
         self.marketing_settings, self.marketing_messages = self.load_marketing()
-        self.color_image = center_crop_16_9(cv2.imread(str(COLOR_IMAGE_FILE)))
+        self.color_image = cv2.imread(str(COLOR_IMAGE_FILE))
         self._build()
         self._style()
         self.worker = CameraWorker()
@@ -458,8 +505,17 @@ class MainWindow(QMainWindow):
         self.gui_timer.timeout.connect(self.pull_latest)
         self.gui_timer.start()
         self.marketing_timer = QTimer(self)
-        self.marketing_timer.setInterval(int(float(self.marketing_settings.get("DISPLAY_TIME", 12)) * 1000))
+        self.marketing_timer.setSingleShot(True)
         self.marketing_timer.timeout.connect(self.next_message)
+        self.message_progress_timer = QTimer(self)
+        self.message_progress_timer.setInterval(50)
+        self.message_progress_timer.timeout.connect(self.update_message_progress)
+        self.view_timer = QTimer(self)
+        self.view_timer.setInterval(
+            int(float(self.marketing_settings.get("VIEW_ROTATION_SECONDS", 5)) * 1000)
+        )
+        self.view_timer.timeout.connect(self.next_view)
+        self.view_timer.start()
 
     def _build(self):
         self.stack = QStackedWidget()
@@ -479,15 +535,10 @@ class MainWindow(QMainWindow):
         return cards
 
     @staticmethod
-    def _add_grid(layout, cards, margin=0, spacing=4):
-        grid = QGridLayout()
-        grid.setContentsMargins(margin, margin, margin, margin)
-        grid.setSpacing(spacing)
-        for card, (row, col) in zip(cards, ((0, 0), (0, 1), (1, 0), (1, 1))):
-            grid.addWidget(card, row, col)
-        grid.setRowStretch(0, 1); grid.setRowStretch(1, 1)
-        grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
+    def _add_grid(layout, cards, spacing):
+        grid = FocusedViewLayout(cards, spacing)
         layout.addLayout(grid, 1)
+        return grid
 
     def _build_main(self):
         root = QVBoxLayout(self.main_page)
@@ -503,7 +554,9 @@ class MainWindow(QMainWindow):
         header.addWidget(logo); header.addWidget(title); header.addStretch(); header.addWidget(self.demo_button)
         root.addLayout(header)
         self.main_cards = self._make_cards()
-        self._add_grid(root, self.main_cards, spacing=6)
+        self.main_views = self._add_grid(
+            root, self.main_cards, int(self.marketing_settings.get("VIEW_SPACING", 1))
+        )
         controls = QFrame(); controls.setObjectName("controls")
         bar = QHBoxLayout(controls)
         bar.addWidget(QLabel("Exposure"))
@@ -525,9 +578,11 @@ class MainWindow(QMainWindow):
         top=QWidget();top.setObjectName("demoHeader");header_layout=QHBoxLayout(top);header_layout.setContentsMargins(34,8,34,8);header_layout.setSpacing(28);self.demo_logo=QLabel();self.demo_logo.setFixedSize(285,93);logo_path=ICON_DIR/"ids-logo_black_rgb.png"
         if logo_path.exists():self.demo_logo.setPixmap(QPixmap(str(logo_path)).scaled(self.demo_logo.size(),Qt.KeepAspectRatio,Qt.SmoothTransformation))
         else:self.demo_logo.setText("IDS")
-        self.demo_logo.setAlignment(Qt.AlignLeft|Qt.AlignVCenter);header_layout.addWidget(self.demo_logo,0,Qt.AlignVCenter);self.message_box=QWidget();message_layout=QVBoxLayout(self.message_box);message_layout.setContentsMargins(0,0,0,0);message_layout.setSpacing(4);self.demo_title=QLabel();self.demo_title.setObjectName("demoTitle");self.demo_title.setAlignment(Qt.AlignCenter);self.demo_title.setWordWrap(True);self.demo_subtitle=QLabel();self.demo_subtitle.setObjectName("demoSubtitle");self.demo_subtitle.setAlignment(Qt.AlignCenter);self.demo_subtitle.setWordWrap(True);message_layout.addStretch();message_layout.addWidget(self.demo_title);message_layout.addWidget(self.demo_subtitle);message_layout.addStretch();self.message_effect=QGraphicsOpacityEffect(self.message_box);self.message_box.setGraphicsEffect(self.message_effect);header_layout.addWidget(self.message_box,1,Qt.AlignVCenter);top.setMinimumHeight(125);root.addWidget(top)
+        self.demo_logo.setAlignment(Qt.AlignLeft|Qt.AlignVCenter);header_layout.addWidget(self.demo_logo,0,Qt.AlignVCenter);self.message_box=QWidget();message_layout=QHBoxLayout(self.message_box);message_layout.setContentsMargins(0,0,0,0);message_layout.setSpacing(12);message_text=QWidget();message_text_layout=QVBoxLayout(message_text);message_text_layout.setContentsMargins(0,0,0,0);message_text_layout.setSpacing(4);self.demo_title=QLabel();self.demo_title.setObjectName("demoTitle");self.demo_title.setAlignment(Qt.AlignCenter);self.demo_title.setWordWrap(True);self.demo_subtitle=QLabel();self.demo_subtitle.setObjectName("demoSubtitle");self.demo_subtitle.setAlignment(Qt.AlignCenter);self.demo_subtitle.setWordWrap(True);message_text_layout.addStretch();message_text_layout.addWidget(self.demo_title);message_text_layout.addWidget(self.demo_subtitle);message_text_layout.addStretch();message_layout.addWidget(message_text,1);self.message_progress=MessageProgressIndicator(self.marketing_settings.get("ACCENT_COLOR","#008A96"));message_layout.addWidget(self.message_progress,0,Qt.AlignRight|Qt.AlignVCenter);self.message_effect=QGraphicsOpacityEffect(self.message_box);self.message_box.setGraphicsEffect(self.message_effect);header_layout.addWidget(self.message_box,1,Qt.AlignVCenter);top.setMinimumHeight(125);root.addWidget(top)
         self.demo_cards = self._make_cards()
-        self._add_grid(root, self.demo_cards, margin=3, spacing=4)
+        self.demo_views = self._add_grid(
+            root, self.demo_cards, int(self.marketing_settings.get("VIEW_SPACING", 1))
+        )
         bottom = QWidget(); bottom_layout = QVBoxLayout(bottom)
         bottom_layout.setContentsMargins(20, 2, 20, 4)
         self.facts = QWidget(); facts_layout = QHBoxLayout(self.facts); facts_layout.setContentsMargins(0, 0, 0, 0)
@@ -563,26 +618,39 @@ class MainWindow(QMainWindow):
         """)
 
     def load_marketing(self):
-        settings, messages, section, current = {}, [], "", {}
-        if MARKETING_FILE.exists():
-            for raw in MARKETING_FILE.read_text(encoding="utf-8-sig").splitlines():
-                line = raw.strip()
-                if not line or line.startswith("#"): continue
-                if line.startswith("[") and line.endswith("]"):
-                    if section.startswith("MSG") and current: messages.append(self.message_from(current))
-                    section, current = line[1:-1].upper(), {}
-                    continue
-                if "=" not in line: continue
-                key, value = [x.strip() for x in line.split("=", 1)]
-                if section == "SETTINGS": settings[key.upper()] = value
-                elif section.startswith("MSG"): current[key.upper()] = value
-            if section.startswith("MSG") and current: messages.append(self.message_from(current))
-        fallback = [{"title":"MULTISPECTRAL INSIGHT","subtitle":"Live vegetation analysis","facts":[("20 MP","High spatial resolution"),("NDVI","Vegetation vitality"),("CVI","Chlorophyll-related differences")]}]
-        return settings, messages or fallback
+        with CONFIG_FILE.open("rb") as config_file:
+            config = tomllib.load(config_file)
+        settings = config.get("settings")
+        if not isinstance(settings, dict):
+            raise ValueError(f"{CONFIG_FILE} must contain a [settings] table")
+        if int(settings.get("VIEW_SPACING", 1)) < 0:
+            raise ValueError("VIEW_SPACING must be zero or greater")
+        for name in ("DISPLAY_TIME", "VIEW_ROTATION_SECONDS"):
+            if float(settings.get(name, 0)) <= 0:
+                raise ValueError(f"{name} must be greater than zero")
+
+        message_files = sorted(MESSAGES_DIR.glob("*.toml"))
+        if not message_files:
+            raise ValueError(f"No message files found in {MESSAGES_DIR}")
+        messages = []
+        for message_file in message_files:
+            with message_file.open("rb") as file:
+                messages.append(self.message_from(tomllib.load(file), message_file))
+        return settings, messages
 
     @staticmethod
-    def message_from(data):
-        return {"title":data["TITLE"], "subtitle":data["SUBTITLE"], "facts":[(data[f"FACT{i}_TITLE"],data[f"FACT{i}_DETAIL"]) for i in range(1,4)]}
+    def message_from(data, source):
+        facts = data.get("facts")
+        if not isinstance(facts, list) or len(facts) != 3:
+            raise ValueError(f"{source} must define exactly three [[facts]] tables")
+        try:
+            return {
+                "title": data["title"],
+                "subtitle": data["subtitle"],
+                "facts": [(fact["title"], fact["detail"]) for fact in facts],
+            }
+        except KeyError as error:
+            raise ValueError(f"{source} is missing required field {error.args[0]!r}") from error
 
     def pull_latest(self):
         result, version = self.worker.latest()
@@ -602,9 +670,9 @@ class MainWindow(QMainWindow):
     def update_state(self, text, connected): pass
 
     def enter_demo(self):
-        self.demo_mode = True; self._normal_geometry = self.normalGeometry(); self.stack.setCurrentWidget(self.demo_page); self.showFullScreen(); self.marketing_timer.start(); QTimer.singleShot(100, self.refresh_visible)
+        self.demo_mode = True; self._normal_geometry = self.normalGeometry(); self.stack.setCurrentWidget(self.demo_page); self.showFullScreen(); self.schedule_next_message(); self.message_progress_timer.start(); QTimer.singleShot(100, self.refresh_visible)
     def exit_demo(self):
-        self.demo_mode = False; self.marketing_timer.stop(); self.stack.setCurrentWidget(self.main_page); self.showNormal()
+        self.demo_mode = False; self.marketing_timer.stop(); self.message_progress_timer.stop(); self.message_progress.set_progress(0); self.stack.setCurrentWidget(self.main_page); self.showNormal()
         if self._normal_geometry and self._normal_geometry.isValid(): self.setGeometry(self._normal_geometry)
         QTimer.singleShot(100, self.refresh_visible)
 
@@ -617,13 +685,35 @@ class MainWindow(QMainWindow):
 
     def next_message(self):
         if self._animation is not None: return
+        self.marketing_timer.stop()
         fade = float(self.marketing_settings.get("FADE_OUT_TIME", 1)); group = QParallelAnimationGroup(self)
         for effect in (self.message_effect, self.facts_effect): group.addAnimation(self.make_animation(effect, 1, 0, fade))
         def swap():
             self._marketing_index = (self._marketing_index+1) % len(self.marketing_messages); self.apply_message(); inside = QParallelAnimationGroup(self)
             for effect in (self.message_effect, self.facts_effect): inside.addAnimation(self.make_animation(effect, 0, 1, float(self.marketing_settings.get("FADE_IN_TIME",1))))
-            inside.finished.connect(lambda: setattr(self, "_animation", None)); self._animation = inside; inside.start()
+            inside.finished.connect(self.schedule_next_message); self._animation = inside; inside.start()
         group.finished.connect(swap); self._animation = group; group.start()
+
+    def schedule_next_message(self):
+        self._animation = None
+        if not self.demo_mode:
+            return
+        self._message_started_at = time.monotonic()
+        self.message_progress.set_progress(0)
+        self.marketing_timer.start(
+            int(float(self.marketing_settings.get("DISPLAY_TIME", 12)) * 1000)
+        )
+
+    def update_message_progress(self):
+        if self._message_started_at is None:
+            return
+        duration = float(self.marketing_settings.get("DISPLAY_TIME", 12))
+        self.message_progress.set_progress((time.monotonic() - self._message_started_at) / duration)
+
+    def next_view(self):
+        self._active_view_index = (self._active_view_index + 1) % len(self.main_cards)
+        self.main_views.set_focus(self._active_view_index)
+        self.demo_views.set_focus(self._active_view_index)
 
     def refresh_visible(self):
         for card in (self.demo_cards if self.demo_mode else self.main_cards): card._refresh()
@@ -640,7 +730,7 @@ class MainWindow(QMainWindow):
         super().keyPressEvent(event)
 
     def closeEvent(self, event):
-        self.gui_timer.stop(); self.marketing_timer.stop()
+        self.gui_timer.stop(); self.marketing_timer.stop(); self.message_progress_timer.stop(); self.view_timer.stop()
         if self._animation: self._animation.stop()
         self.worker.stop_worker()
         if not self.worker.wait(3500): self.worker.terminate(); self.worker.wait()

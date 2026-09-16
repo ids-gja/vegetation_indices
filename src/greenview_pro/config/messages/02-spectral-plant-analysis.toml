@@ -1,0 +1,14 @@
+title = "SPECTRAL PLANT ANALYSIS"
+subtitle = "Vegetation indices reveal information beyond conventional color imaging."
+
+[[facts]]
+title = "GREEN, RED AND NIR"
+detail = "Custom spectral filter for vegetation analysis"
+
+[[facts]]
+title = "NDVI"
+detail = "Visualize vegetation vitality and stress patterns"
+
+[[facts]]
+title = "CVI"
+detail = "Highlight chlorophyll-related differences"

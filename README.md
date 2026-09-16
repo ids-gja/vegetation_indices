@@ -8,7 +8,8 @@ Desktop application for live RAW, NDVI, CVI, and TVI visualization with IDS came
 src/greenview_pro/             Application package
   assets/icons/                Bundled branding assets
   assets/images/               Bundled demonstration images
-  config/                      Runtime marketing configuration
+  config/config.toml           Runtime UI and marketing settings
+  config/messages/             One TOML file per marketing message
 archive/                       Retained historical application versions
 snapshots/                     Generated image captures (not tracked)
 ```
@@ -35,3 +36,9 @@ python -m greenview_pro
 The live processing path is capped at 1280x720 pixels (`PREVIEW_MAX_PIXELS`) before
 calculating vegetation indices. This keeps the preview responsive while the camera
 continues acquiring at its configured full resolution.
+
+## Configuration
+
+`src/greenview_pro/config/config.toml` controls view spacing (default: 1 px), image
+rotation, message timing, and styling. Add a TOML file under `config/messages` to add
+a marketing message; each file defines a title, subtitle, and three `[[facts]]`.
