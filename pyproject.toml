@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ids-greenview-pro"
+version = "2.8.0"
+description = "Live RAW, NDVI, CVI, and TVI visualization for IDS cameras"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "matplotlib",
+    "numpy",
+    "opencv-python",
+    "PySide6",
+]
+
+[project.scripts]
+greenview-pro = "greenview_pro.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+greenview_pro = [
+    "assets/icons/*.png",
+    "assets/images/*.jpg",
+    "config/*.txt",
+]

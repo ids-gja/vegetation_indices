@@ -1,0 +1,73 @@
+# IDS GreenView Pro VISION demo marketing messages v1
+[SETTINGS]
+DISPLAY_TIME=12.0
+FADE_OUT_TIME=1.0
+FADE_IN_TIME=1.0
+FONT_FAMILY=Source Sans Pro
+TITLE_FONT_SIZE=52
+SUBTITLE_FONT_SIZE=25
+FACT_TITLE_FONT_SIZE=30
+FACT_DETAIL_FONT_SIZE=28
+WATERMARK_FONT_SIZE=9
+BACKGROUND_COLOR=#F5F5F5
+TITLE_COLOR=#203A40
+SUBTITLE_COLOR=#4F4F4F
+ACCENT_COLOR=#008A96
+DETAIL_COLOR=#4F4F4F
+WATERMARK_COLOR=#A6A6A6
+LOGO_FILE=assets/icons/ids-logo_black_rgb.png
+LOGO_WIDTH=285
+LOGO_HEIGHT=93
+WATERMARK_TEXT=
+
+# IDS GreenView Pro VISION Demo Marketing Messages v2
+
+[MSG1]
+TITLE=SEE THE DIFFERENCE
+SUBTITLE=Natural vegetation and artificial grass appear similar in the visible image.
+FACT1_TITLE=RGB IMAGE
+FACT1_DETAIL=Plant and artificial grass look alike
+FACT2_TITLE=NDVI IMAGE
+FACT2_DETAIL=Living vegetation becomes immediately visible
+FACT3_TITLE=INSTANT CONTRAST
+FACT3_DETAIL=Spectral information reveals the difference
+
+[MSG2]
+TITLE=SPECTRAL PLANT ANALYSIS
+SUBTITLE=Vegetation indices reveal information beyond conventional color imaging.
+FACT1_TITLE=GREEN, RED AND NIR
+FACT1_DETAIL=Custom spectral filter for vegetation analysis
+FACT2_TITLE=NDVI
+FACT2_DETAIL=Visualize vegetation vitality and stress patterns
+FACT3_TITLE=CVI
+FACT3_DETAIL=Highlight chlorophyll-related differences
+
+[MSG3]
+TITLE=HIGH RESOLUTION SPECTRAL IMAGING
+SUBTITLE=Based on a standard uEye XCP camera with AR2020 image sensor.
+FACT1_TITLE=20 MP SENSOR
+FACT1_DETAIL=High NIR sensitivity
+FACT2_TITLE=HIGH SPATIAL RESOLUTION
+FACT2_DETAIL=Capture fine plant structures and details
+FACT3_TITLE=SPECTRAL DATA
+FACT3_DETAIL=Acquire green, red and near-infrared information
+
+[MSG4]
+TITLE=FROM RESEARCH TO EVALUATION
+SUBTITLE=This camera is available as an evaluation platform for customer testing.
+FACT1_TITLE=RESEARCH PROJECT
+FACT1_DETAIL=Technology developed and validated in R&D
+FACT2_TITLE=EVALUATION KIT
+FACT2_DETAIL=Available for customer feasibility studies
+FACT3_TITLE=EXPLORE APPLICATIONS
+FACT3_DETAIL=Assess suitability for your own workflow
+
+[MSG5]
+TITLE=START TESTING IMMEDIATELY
+SUBTITLE=Reference software included to accelerate evaluation and prototyping.
+FACT1_TITLE=PYTHON SOFTWARE
+FACT1_DETAIL=Example application included
+FACT2_TITLE=OPENCV BASED
+FACT2_DETAIL=Open and extensible processing pipeline
+FACT3_TITLE=RAPID PROTOTYPING
+FACT3_DETAIL=Use as a starting point for your own developments
