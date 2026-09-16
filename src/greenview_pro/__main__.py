@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """IDS GreenView Pro v2.8 - RAW, NDVI, CVI and TVI live visualization."""
 
-import copy
 import sys
 import time
 from threading import Lock
@@ -32,6 +31,7 @@ GUI_INTERVAL_MS = 66
 LOW_DEFAULT = 5
 HIGH_DEFAULT = 99
 RECONNECT_SECONDS = 2.0
+PREVIEW_MAX_PIXELS = 1280 * 720
 
 CCM = np.array([
     [0.116014, -0.017513, -0.016800],
@@ -63,6 +63,16 @@ def normalized(image, low, high):
 
 def heatmap(image):
     return cv2.applyColorMap(np.ascontiguousarray((image * 255).astype(np.uint8)), COLORMAP)
+
+
+def preview_size(height, width):
+    """Return a bounded preview size without upscaling a camera image."""
+    pixels = height * width
+    if pixels <= PREVIEW_MAX_PIXELS:
+        return width, height
+    scale = np.sqrt(PREVIEW_MAX_PIXELS / pixels)
+    return max(1, int(width * scale)), max(1, int(height * scale))
+
 
 def center_crop_16_9(image):
     if image is None: return None
@@ -245,6 +255,15 @@ class CameraWorker(QThread):
         blue_raw = raw[1::2, 0::2].astype(np.float32)
         red_raw = raw[0::2, 1::2].astype(np.float32)
         green_raw = raw[0::2, 0::2].astype(np.float32)
+        output_size = preview_size(*red_raw.shape)
+        if output_size != (red_raw.shape[1], red_raw.shape[0]):
+            red_raw = cv2.resize(red_raw, output_size, interpolation=cv2.INTER_AREA)
+            green_raw = cv2.resize(green_raw, output_size, interpolation=cv2.INTER_AREA)
+            blue_raw = cv2.resize(blue_raw, output_size, interpolation=cv2.INTER_AREA)
+        # RAW is a grayscale preview: one Bayer phase avoids resizing the full sensor image.
+        raw_preview = raw[0::2, 0::2]
+        if output_size != (raw_preview.shape[1], raw_preview.shape[0]):
+            raw_preview = cv2.resize(raw_preview, output_size, interpolation=cv2.INTER_AREA)
 
         self._wb_frame_counter += 1
         if self._white_balance_mode == "Continuous":
@@ -273,10 +292,21 @@ class CameraWorker(QThread):
             else:
                 a=self._bounds_smoothing;self._ndvi_bounds=tuple((1-a)*o+a*n for o,n in zip(self._ndvi_bounds,ndvi_new));self._cvi_bounds=tuple((1-a)*o+a*n for o,n in zip(self._cvi_bounds,cvi_new))
         ndvi=heatmap(normalize_with_bounds(ndvi_raw,*self._ndvi_bounds));cvi=heatmap(normalize_with_bounds(cvi_raw,*self._cvi_bounds))
-        maximum=float(np.iinfo(raw.dtype).max) if np.issubdtype(raw.dtype,np.integer) else max(float(np.max(raw)),1)
-        raw8=raw if raw.dtype==np.uint8 else np.clip(raw.astype(np.float32)*(255/maximum),0,255).astype(np.uint8)
-        raw_bgr=cv2.cvtColor(raw8,cv2.COLOR_GRAY2BGR)
-        return tuple(center_crop_16_9(x) for x in (raw_bgr,ndvi,cvi))
+        maximum = (
+            float(np.iinfo(raw.dtype).max)
+            if np.issubdtype(raw.dtype, np.integer)
+            else max(float(np.max(raw_preview)), 1)
+        )
+        raw8 = (
+            raw_preview
+            if raw_preview.dtype == np.uint8
+            else cv2.convertScaleAbs(raw_preview, alpha=255 / maximum)
+        )
+        raw_bgr = cv2.cvtColor(raw8, cv2.COLOR_GRAY2BGR)
+        return tuple(
+            np.ascontiguousarray(center_crop_16_9(image))
+            for image in (raw_bgr, ndvi, cvi)
+        )
     def latest(self):
         with self._latest_lock:return self._latest,self._latest_version
     def run(self):
@@ -327,7 +357,7 @@ class CameraWorker(QThread):
                     buffer = self._stream.WaitForFinishedBuffer(ids_peak.Timeout(1000))
                     try:
                         image = ids_peak_ipl_extension.BufferToImage(buffer)
-                        raw = copy.deepcopy(image.get_numpy_2D())
+                        raw = image.get_numpy_2D().copy()
                     finally:
                         self._stream.QueueBuffer(buffer)
                     now = time.perf_counter()
@@ -349,11 +379,11 @@ class ImageCard(QFrame):
     IMAGE_MARGIN=12
     def __init__(self,title,subtitle="",smooth=True):
         super().__init__();self.setObjectName("imageCard");layout=QVBoxLayout(self);layout.setContentsMargins(0,0,0,0);self.image=QLabel("Waiting for image...");self.image.setObjectName("imageArea");self.image.setAlignment(Qt.AlignCenter);self.image.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Ignored);self.image.setMinimumSize(0,0);layout.addWidget(self.image,1);self.overlay=QLabel(title,self);self.overlay.setObjectName("imageOverlay");self.overlay.setAttribute(Qt.WA_TransparentForMouseEvents,True);self._array=None;self._smooth=smooth
-    def set_image(self,array):self._array=center_crop_16_9(array);self._refresh()
+    def set_image(self,array):self._array=np.ascontiguousarray(center_crop_16_9(array));self._refresh()
     def clear_image(self):self._array=None;self.image.setPixmap(QPixmap());self.image.setText("Waiting for image...");self.overlay.hide()
     def _refresh(self):
         if self._array is None or self.image.width()<2 or self.image.height()<2:return
-        a=np.ascontiguousarray(self._array);h,w=a.shape[:2];q=QImage(a.data,w,h,a.strides[0],QImage.Format_BGR888).copy();mode=Qt.SmoothTransformation if self._smooth else Qt.FastTransformation;pix=QPixmap.fromImage(q).scaled(self.image.size(),Qt.KeepAspectRatio,mode);self.image.setPixmap(pix);self.image.setText("");pos=self.image.mapTo(self,self.image.rect().topLeft());xo=max(0,(self.image.width()-pix.width())//2);yo=max(0,(self.image.height()-pix.height())//2);self.overlay.adjustSize();self.overlay.move(pos.x()+xo+self.IMAGE_MARGIN,pos.y()+yo+self.IMAGE_MARGIN);self.overlay.show();self.overlay.raise_()
+        h,w=self._array.shape[:2];q=QImage(self._array.data,w,h,self._array.strides[0],QImage.Format_BGR888);mode=Qt.SmoothTransformation if self._smooth else Qt.FastTransformation;pix=QPixmap.fromImage(q).scaled(self.image.size(),Qt.KeepAspectRatio,mode);self.image.setPixmap(pix);self.image.setText("");pos=self.image.mapTo(self,self.image.rect().topLeft());xo=max(0,(self.image.width()-pix.width())//2);yo=max(0,(self.image.height()-pix.height())//2);self.overlay.adjustSize();self.overlay.move(pos.x()+xo+self.IMAGE_MARGIN,pos.y()+yo+self.IMAGE_MARGIN);self.overlay.show();self.overlay.raise_()
     def resizeEvent(self,e):super().resizeEvent(e);self._refresh()
 class PercentControl(QFrame):
     changed = Signal(int)

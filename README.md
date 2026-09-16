@@ -29,3 +29,9 @@ Alternatively, run directly from a checkout:
 $env:PYTHONPATH = "src"
 python -m greenview_pro
 ```
+
+## Live preview performance
+
+The live processing path is capped at 1280x720 pixels (`PREVIEW_MAX_PIXELS`) before
+calculating vegetation indices. This keeps the preview responsive while the camera
+continues acquiring at its configured full resolution.
