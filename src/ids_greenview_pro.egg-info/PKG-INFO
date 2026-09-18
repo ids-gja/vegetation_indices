@@ -1,0 +1,57 @@
+Metadata-Version: 2.4
+Name: ids-greenview-pro
+Version: 3.1.0
+Summary: Live RAW, NDVI, and CVI visualization for IDS cameras
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: matplotlib
+Requires-Dist: numpy
+Requires-Dist: opencv-python
+Requires-Dist: PySide6
+
+# IDS GreenView Pro
+
+Desktop application for live RAW, NDVI, and CVI visualization with IDS cameras.
+
+## Project layout
+
+```text
+src/greenview_pro/             Application package
+  app.py                       Qt application entrypoint
+  processing.py                Camera and image-processing pipeline
+src/icons/                     Bundled branding assets
+src/images/                    Bundled demonstration images
+src/config.toml                Runtime UI and marketing settings
+src/messages/                  One TOML file per marketing message
+archive/                       Retained historical application versions
+snapshots/                     Generated image captures (not tracked)
+```
+
+## Setup and run
+
+Install the IDS peak SDK and its Python bindings (`ids_peak`) first, then install the
+application and its Python dependencies:
+
+```powershell
+python -m pip install -e .
+greenview-pro
+```
+
+Alternatively, run directly from a checkout:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m greenview_pro
+```
+
+## Live preview performance
+
+The live processing path is capped at the active image area's on-screen dimensions
+before calculating vegetation indices. This keeps the preview sharp without spending
+CPU on sensor pixels that are not visible.
+
+## Configuration
+
+`src/config.toml` controls message timing and styling. Add a TOML file under
+`src/messages` to add
+a marketing message; each file defines a title, subtitle, and three `[[facts]]`.
