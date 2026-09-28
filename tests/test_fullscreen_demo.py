@@ -40,16 +40,38 @@ def test_slideshow_bar_paints_continuous_fill():
     assert bar._progress == 0.375
 
 
-def test_normal_preview_keeps_square_image_areas(monkeypatch):
+def test_normal_preview_uses_source_aspect_and_compact_grid(monkeypatch):
     monkeypatch.setattr(app.CameraWorker, "start", lambda self: None)
     application = QApplication.instance() or QApplication([])
     window = app.MainWindow()
     try:
+        window.resize(1200, 800)
         window.show()
         application.processEvents()
+        window.update_frame_dimensions(1920, 1080)
+        application.processEvents()
+        cards = window.main_cards
         assert all(
-            card.image.width() == card.image.height()
-            for card in window.main_cards
+            card.image.width() / card.image.height() == pytest.approx(16 / 9, abs=0.02)
+            for card in cards
+        )
+        assert cards[1].x() - cards[0].geometry().right() - 1 <= 2
+        assert cards[2].y() - cards[0].geometry().bottom() - 1 <= 2
+        assert all(card.size() == cards[0].size() for card in cards)
+        assert window._last_preview_size == (
+            cards[1].image.width() * 2,
+            cards[1].image.height() * 2,
+        )
+    finally:
+        window.close()
+
+
+def test_fullscreen_uses_display_sized_preview_after_normal_mode(monkeypatch):
+    application, window = demo_window(monkeypatch)
+    try:
+        assert window._last_preview_size == (
+            window.demo_large.image.width(),
+            window.demo_large.image.height(),
         )
     finally:
         window.close()
@@ -131,3 +153,49 @@ def test_fullscreen_layout_adapts_to_live_sensor_aspect(monkeypatch):
         )
     finally:
         window.close()
+
+
+def test_fullscreen_layout_stays_fixed_as_bayer_preview_rounds(monkeypatch):
+    from greenview_pro.processing import preview_bayer
+
+    application, window = demo_window(monkeypatch)
+    try:
+        source = np.zeros((800, 1280), dtype=np.uint16)
+        window.worker.frame_dimensions_changed.emit(source.shape[1], source.shape[0])
+        application.processEvents()
+        sizes = []
+        for version in range(1, 7):
+            preview = preview_bayer(source, window._last_preview_size)
+            frame = np.zeros((*preview.shape, 3), dtype=np.uint8)
+            monkeypatch.setattr(
+                window.worker,
+                "latest",
+                lambda frame=frame, version=version: ((frame, frame, frame), version),
+            )
+            window.pull_latest()
+            application.processEvents()
+            sizes.append(window.demo_large.size())
+        assert len(set(sizes)) == 1
+        assert window.demo_large.width() / window.demo_large.height() == pytest.approx(
+            source.shape[1] / source.shape[0], abs=0.01
+        )
+    finally:
+        window.close()
+
+
+def test_camera_reports_source_size_only_when_it_changes():
+    worker = app.CameraWorker()
+    dimensions = []
+    worker.frame_dimensions_changed.connect(
+        lambda width, height: dimensions.append((width, height))
+    )
+    worker._note_frame_dimensions(np.zeros((800, 1280), dtype=np.uint16))
+    worker._note_frame_dimensions(np.zeros((800, 1280), dtype=np.uint16))
+    worker._note_frame_dimensions(np.zeros((1080, 1920), dtype=np.uint16))
+    assert dimensions == [(1280, 800), (1920, 1080)]
+
+
+def test_camera_rejects_empty_source_dimensions_before_emitting():
+    worker = app.CameraWorker()
+    with pytest.raises(RuntimeError, match="expected 2D RAW Bayer image"):
+        worker._note_frame_dimensions(np.empty((0, 12), dtype=np.uint16))

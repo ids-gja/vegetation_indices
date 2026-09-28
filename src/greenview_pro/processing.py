@@ -10,11 +10,15 @@ import numpy as np
 from ids_peak import ids_peak, ids_peak_ipl_extension
 from PySide6.QtCore import QThread, Signal, Slot
 from ndvi_processing import NDVIProcessor, SensorConfig
+from greenview_pro.auto_exposure import ExposureSearch
+from greenview_pro.camera_gains import reset_color_gains
 
 LOW_DEFAULT = 5
 HIGH_DEFAULT = 99
 RECONNECT_SECONDS = 2.0
 DEFAULT_PREVIEW_SIZE = (1280, 1280)
+INITIAL_EXPOSURE_US = 3500
+BLACK_LEVEL_DN = 2.0
 
 _cmap = matplotlib.colormaps.get_cmap("RdYlGn").resampled(256)
 _colors = (_cmap(np.linspace(0, 1, 256))[:, :3] * 255).astype(np.uint8)
@@ -59,6 +63,17 @@ def maximize_frame_rate(nodemap):
     else:
         raise ValueError("Camera frame rate did not stabilize at maximum exposure")
     return minimum, maximum, actual_fps
+
+
+def configure_camera_exposure(nodemap, minimum, maximum):
+    black_level = nodemap.FindNode("BlackLevel")
+    black_level.SetValue(BLACK_LEVEL_DN)
+    if not np.isclose(black_level.Value(), BLACK_LEVEL_DN, rtol=0, atol=1e-6):
+        raise ValueError(f"camera BlackLevel must be {BLACK_LEVEL_DN} DN")
+
+    exposure = nodemap.FindNode("ExposureTime")
+    exposure.SetValue(float(np.clip(INITIAL_EXPOSURE_US, minimum, maximum)))
+    return int(round(exposure.Value()))
 
 
 def normalized(image, low, high):
@@ -138,6 +153,7 @@ def preview_bayer(raw, maximum_size=DEFAULT_PREVIEW_SIZE):
 
 class CameraWorker(QThread):
     frames_ready = Signal(object, object, object)
+    frame_dimensions_changed = Signal(int, int)
     state_changed = Signal(str, bool)
     exposure_range = Signal(int, int, int)
     recoverable_error = Signal(str)
@@ -148,11 +164,14 @@ class CameraWorker(QThread):
         self._wanted = True
         self._low = LOW_DEFAULT
         self._high = HIGH_DEFAULT
-        # Session settings survive disconnect/reconnect and manual close/start.
         self._saved_exposure = None
         self._pending_exposure = None
         self._exposure_min = None
         self._exposure_cap = None
+        self._initial_exposure = INITIAL_EXPOSURE_US
+        self._black_level = BLACK_LEVEL_DN
+        self._auto_exposure = None
+        self._auto_settle_frames = 0
         self._library_open = False
         self._device = None
         self._remote = None
@@ -166,6 +185,7 @@ class CameraWorker(QThread):
         self._bounds_update_interval = 10
         self._bounds_smoothing = np.float32(0.25)
         self._preview_size = DEFAULT_PREVIEW_SIZE
+        self._source_dimensions = None
         qe = files("ndvi_processing").joinpath("resources", "sensor_AR2020.csv")
         self._default_processor = NDVIProcessor(SensorConfig("AR2020", "GRBG", qe))
         self._processor = self._default_processor
@@ -193,6 +213,8 @@ class CameraWorker(QThread):
             requested = max(self._exposure_min, min(requested, self._exposure_cap))
         self._saved_exposure = requested
         self._pending_exposure = requested
+        self._auto_exposure = None
+        self._auto_settle_frames = 0
 
     @Slot(int, int)
     def set_preview_size(self, width, height):
@@ -200,6 +222,8 @@ class CameraWorker(QThread):
             self._preview_size = (width, height)
 
     def _raw_indices(self, raw):
+        if self._processor is self._default_processor:
+            raw = np.asarray(raw, dtype=np.float32) - np.float32(self._black_level)
         return self._processor.process_raw(raw).indices
 
     def stop_worker(self):
@@ -223,14 +247,15 @@ class CameraWorker(QThread):
         self._exposure_min = exposure_minimum
         self._exposure_cap = exposure_maximum
         payload = self._remote.FindNode("PayloadSize").Value()
-        exposure = self._remote.FindNode("ExposureTime")
-        if self._saved_exposure is None:
-            self._saved_exposure = exposure_maximum
-        else:
-            self._saved_exposure = max(
-                exposure_minimum, min(self._saved_exposure, exposure_maximum)
-            )
-            exposure.SetValue(float(self._saved_exposure))
+        self._saved_exposure = configure_camera_exposure(
+            self._remote, exposure_minimum, exposure_maximum
+        )
+        self._black_level = float(self._remote.FindNode("BlackLevel").Value())
+        reset_color_gains(self._remote)
+        self._auto_exposure = ExposureSearch(
+            exposure_minimum, exposure_maximum, self._saved_exposure
+        )
+        self._auto_settle_frames = 2
         self._pending_exposure = None
         self.exposure_range.emit(
             exposure_minimum, exposure_maximum, self._saved_exposure
@@ -263,7 +288,32 @@ class CameraWorker(QThread):
     def _check_processor(self):
         pass
 
+    def _advance_auto_exposure(self, raw):
+        search = self._auto_exposure
+        if search is None or search.done:
+            return False
+        if self._auto_settle_frames:
+            self._auto_settle_frames -= 1
+            return False
+        requested = search.observe(raw)
+        if search.done and search.safe is None:
+            self.recoverable_error.emit(
+                "Autoexposure: image is still saturated at minimum exposure"
+            )
+        if requested is None:
+            return False
+        exposure = self._remote.FindNode("ExposureTime")
+        exposure.SetValue(float(requested))
+        actual = int(round(exposure.Value()))
+        search.exposure = actual
+        self._saved_exposure = actual
+        self._auto_settle_frames = 2
+        self.exposure_range.emit(self._exposure_min, self._exposure_cap, actual)
+        return True
+
     def _close_camera(self):
+        self._auto_exposure = None
+        self._auto_settle_frames = 0
         try:
             if self._remote is not None:
                 node = self._remote.FindNode("AcquisitionStop")
@@ -282,10 +332,22 @@ class CameraWorker(QThread):
         self._stream = None
         self._remote = None
         self._device = None
+        self._source_dimensions = None
         self._camera_closed()
 
     def _camera_closed(self):
         pass
+
+    def _note_frame_dimensions(self, raw):
+        if raw.ndim != 2 or min(raw.shape) < 2:
+            raise RuntimeError(
+                "The camera does not provide the expected 2D RAW Bayer image"
+            )
+        height, width = raw.shape
+        dimensions = (width, height)
+        if dimensions != self._source_dimensions:
+            self._source_dimensions = dimensions
+            self.frame_dimensions_changed.emit(width, height)
 
     def _close_library(self):
         self._close_camera()
@@ -388,6 +450,8 @@ class CameraWorker(QThread):
                     try:
                         image = ids_peak_ipl_extension.BufferToImage(buffer)
                         full_raw = image.get_numpy_2D()
+                        self._note_frame_dimensions(full_raw)
+                        self._advance_auto_exposure(full_raw)
                         self._frame_received(full_raw)
                         raw = preview_bayer(full_raw, self._preview_size)
                     finally:

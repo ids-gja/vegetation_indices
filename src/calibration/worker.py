@@ -6,10 +6,10 @@ from pathlib import Path
 import numpy as np
 from ids_peak import ids_peak
 from PySide6.QtCore import Signal
-from .library import Calibration
+from calibration.library import Calibration
 
 from greenview_pro.processing import CameraWorker
-from .flow import FrameAverage, GainControls, finish_calibration, make_processor, recommend_gains
+from calibration.flow import FrameAverage, GainControls, finish_calibration, make_processor, recommend_gains
 
 
 CALIBRATION_FILE = Path.home() / ".greenview_pro" / "calibration.json"
@@ -61,6 +61,8 @@ class CalibratedCameraWorker(CameraWorker):
         if stage == "second" and self._first_gains is None:
             self.calibration_step.emit("Capture the first white target before the second")
             return
+        self._auto_exposure = None
+        self._auto_settle_frames = 0
         if stage == "first":
             self._first_gains = None
             self._first_auxiliary_gain = None
@@ -72,6 +74,7 @@ class CalibratedCameraWorker(CameraWorker):
                 self._first_auxiliary_gain = (auxiliary_selector, actual)
             self._remote.FindNode("BlackLevel").SetValue(float(black_level))
             self._first_black_level = float(self._remote.FindNode("BlackLevel").Value())
+            self._set_default_black_level(self._first_black_level)
             self._first_exposure = float(self._remote.FindNode("ExposureTime").Value())
             self.black_level_changed.emit(self._first_black_level)
         else:
@@ -157,6 +160,17 @@ class CalibratedCameraWorker(CameraWorker):
             controls.apply_auxiliary(auxiliary_selector, float(auxiliary_value))
         if calibration.hardware_gains is not None:
             controls.apply(calibration.hardware_gains)
+        if calibration.offsets:
+            black = next(iter(calibration.offsets.values()))
+            if any(
+                not np.isclose(value, black, rtol=0, atol=1e-6)
+                for value in calibration.offsets.values()
+            ):
+                raise ValueError("Calibration offsets disagree on camera BlackLevel")
+            self._remote.FindNode("BlackLevel").SetValue(float(black))
+            self._set_default_black_level(
+                float(self._remote.FindNode("BlackLevel").Value())
+            )
         self._calibration = calibration
         self._validate_calibration()
         self._processor = make_processor(calibration, controls.read())
@@ -188,7 +202,14 @@ class CalibratedCameraWorker(CameraWorker):
                 f"camera reports {actual}; recalibrate"
             )
 
+    def _set_default_black_level(self, value):
+        if self._black_level != value:
+            self._black_level = value
+            if self._processor is self._default_processor:
+                self._ndvi_bounds = self._cvi_bounds = None
+
     def _camera_opened(self):
+        self._set_default_black_level(float(self._remote.FindNode("BlackLevel").Value()))
         try:
             self._load_calibration()
         except (ValueError, KeyError, RuntimeError, OSError, ids_peak.Exception) as exc:

@@ -1,4 +1,4 @@
-from app import main
+from greenview_pro.app import main
 
 
 if __name__ == "__main__":

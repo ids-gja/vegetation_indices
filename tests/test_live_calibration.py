@@ -105,3 +105,21 @@ def test_active_calibration_detects_gain_and_black_level_changes():
     worker._remote.gain.values["Red"] = 2
     with pytest.raises(ValueError, match="hardware gain mismatch"):
         worker._validate_calibration()
+
+
+def test_saved_calibration_restores_its_black_level_after_default_camera_startup(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(processing, "CALIBRATION_FILE", tmp_path / "calibration.json")
+    worker = CameraWorker()
+    worker._remote = FakeMap()
+    calibration = Calibration(
+        {"R": 1, "G": 1, "NIR": 1},
+        offsets={"R": 4.0, "G": 4.0, "NIR": 4.0},
+        hardware_gains=worker._controls().read(),
+    )
+    calibration.save(processing.CALIBRATION_FILE)
+    worker._load_calibration()
+    assert worker._remote.black.Value() == 4
+    assert worker._black_level == 4
+    worker._validate_calibration()

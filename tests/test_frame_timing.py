@@ -1,6 +1,10 @@
+from types import SimpleNamespace
+
 import pytest
 
+import greenview_pro.processing as processing
 from greenview_pro.processing import CameraWorker, maximize_frame_rate
+from test_calibration_flow import FakeMap
 
 
 class FakeNode:
@@ -89,3 +93,65 @@ def test_worker_never_requests_exposure_above_frame_rate_cap():
     worker._exposure_cap = 69_444
     worker.set_exposure(100_000)
     assert worker._pending_exposure == 69_444
+
+
+def test_connection_starts_acquisition_only_after_initial_exposure_and_black_level(monkeypatch):
+    camera = FakeCamera()
+    camera.black = FakeNode(0, 0, 10, camera.events, "black")
+    gains = FakeMap()
+    gains.gain.values.update({"Red": 2.0, "Green": 3.0, "Blue": 4.0})
+    original_find = camera.FindNode
+    start = SimpleNamespace(Execute=lambda: None, WaitUntilDone=lambda: None)
+    camera.FindNode = lambda name: (
+        camera.black if name == "BlackLevel"
+        else SimpleNamespace(Value=lambda: 1024) if name == "PayloadSize"
+        else start if name == "AcquisitionStart"
+        else gains.FindNode(name) if name in ("GainSelector", "Gain")
+        else original_find(name)
+    )
+    mode = SimpleNamespace(SetCurrentEntry=lambda value: None)
+    stream = SimpleNamespace(
+        NodeMaps=lambda: [SimpleNamespace(FindNode=lambda name: mode)],
+        NumBuffersAnnouncedMinRequired=lambda: 1,
+        AllocAndAnnounceBuffer=lambda payload: object(),
+        QueueBuffer=lambda buffer: None,
+        StartAcquisition=lambda: assert_start_settings(camera, gains),
+    )
+    device = SimpleNamespace(
+        RemoteDevice=lambda: SimpleNamespace(NodeMaps=lambda: [camera]),
+        DataStreams=lambda: [SimpleNamespace(OpenDataStream=lambda: stream)],
+    )
+    manager = SimpleNamespace(
+        Update=lambda: None,
+        Devices=lambda: [SimpleNamespace(OpenDevice=lambda access: device)],
+    )
+    monkeypatch.setattr(
+        processing.ids_peak, "DeviceManager",
+        SimpleNamespace(Instance=lambda: manager),
+    )
+    monkeypatch.setattr(
+        processing.ids_peak, "Library",
+        SimpleNamespace(Initialize=lambda: None),
+    )
+    worker = CameraWorker()
+    worker._open_camera()
+    assert worker._auto_exposure.exposure == 3500
+    assert worker._auto_settle_frames == 2
+
+
+def assert_start_settings(camera, gains):
+    assert camera.exposure.Value() == 3500
+    assert camera.black.Value() == 2
+    assert {key: gains.gain.values[key] for key in ("Red", "Green", "Blue")} == {
+        "Red": 1.0, "Green": 1.0, "Blue": 1.0
+    }
+
+
+def test_unity_gain_readback_failure_is_reported():
+    from greenview_pro.camera_gains import reset_color_gains
+
+    gains = FakeMap()
+    gains.gain.values["Red"] = 2.0
+    gains.gain.SetValue = lambda value: None
+    with pytest.raises(ValueError, match="Red.*1.0"):
+        reset_color_gains(gains)

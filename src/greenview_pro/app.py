@@ -13,6 +13,7 @@ from PySide6.QtCore import (
     QEasingCurve,
     QParallelAnimationGroup,
     QPropertyAnimation,
+    QSignalBlocker,
     QSize,
     Qt,
     QTimer,
@@ -36,7 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from processing import HIGH_DEFAULT, LOW_DEFAULT, CameraWorker
+from greenview_pro.processing import HIGH_DEFAULT, LOW_DEFAULT, CameraWorker
 
 APP_NAME = "IDS GreenView Pro"
 VERSION = "3.1"
@@ -277,6 +278,7 @@ class MainWindow(QMainWindow):
         self._display_view_index = 0
         self._animation = None
         self._last_preview_size = None
+        self._source_aspect_ratio = None
         self.marketing_settings, self.marketing_messages = self.load_marketing()
         self._view_spacing = max(0, int(self.marketing_settings.get("VIEW_SPACING", 1)))
         self._message_cycle_started = None
@@ -287,6 +289,7 @@ class MainWindow(QMainWindow):
         self._style()
         self.worker = self.worker_class()
         self.worker.state_changed.connect(self.update_state)
+        self.worker.frame_dimensions_changed.connect(self.update_frame_dimensions)
         self.worker.exposure_range.connect(self.configure_exposure)
         self.start_requested.connect(self.worker.start_camera)
         self.close_requested.connect(self.worker.close_camera)
@@ -342,19 +345,17 @@ class MainWindow(QMainWindow):
         grid = QGridLayout()
         grid.setContentsMargins(margin, margin, margin, margin)
         grid.setSpacing(spacing)
+        grid.setAlignment(Qt.AlignCenter)
         for card, (row, col) in zip(cards, ((0, 0), (0, 1), (1, 0), (1, 1))):
             grid.addWidget(card, row, col)
-        grid.setRowStretch(0, 1)
-        grid.setRowStretch(1, 1)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
         layout.addLayout(grid, 1)
 
     def _build_main(self):
         root = QVBoxLayout(self.main_page)
-        root.setContentsMargins(18, 14, 18, 8)
-        root.setSpacing(8)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(4)
         controls = QFrame()
+        self.controls = controls
         controls.setObjectName("controls")
         bar = QHBoxLayout(controls)
         logo = QLabel()
@@ -411,9 +412,33 @@ class MainWindow(QMainWindow):
         self._add_grid(
             root,
             self.main_cards,
-            margin=self._view_spacing,
+            margin=0,
             spacing=self._view_spacing,
         )
+
+    def _size_main_layout(self):
+        layout = self.main_page.layout()
+        margins = layout.contentsMargins()
+        width = self.main_page.width() - margins.left() - margins.right()
+        height = (
+            self.main_page.height()
+            - margins.top()
+            - margins.bottom()
+            - self.controls.height()
+            - layout.spacing()
+        )
+        spacing = self._view_spacing
+        max_width = (width - spacing) // 2
+        max_height = (height - spacing) // 2
+        if min(max_width, max_height) < 2:
+            return
+        aspect = self._demo_image_aspect()
+        card_height = min(max_height, max(2, round(max_width / aspect)))
+        card_width = min(max_width, max(2, round(card_height * aspect)))
+        for card in self.main_cards:
+            card.set_aspect_ratio(aspect)
+            card.setFixedSize(card_width, card_height)
+        self._request_preview_size()
 
     def _build_demo(self):
         root = QVBoxLayout(self.demo_page)
@@ -584,6 +609,8 @@ class MainWindow(QMainWindow):
         self._request_preview_size()
 
     def _demo_image_aspect(self):
+        if self._source_aspect_ratio is not None:
+            return self._source_aspect_ratio
         raw = self._last_images[0] if self._last_images is not None else None
         image = raw if raw is not None else self.color_image
         return image.shape[1] / image.shape[0] if image is not None else 4 / 3
@@ -595,7 +622,8 @@ class MainWindow(QMainWindow):
             key=lambda candidate: candidate.image.width() * candidate.image.height(),
         )
         size = card.image.size()
-        preview_size = (size.width(), size.height())
+        scale = 1 if self.demo_mode else 2
+        preview_size = (size.width() * scale, size.height() * scale)
         if min(preview_size) < 2 or preview_size == self._last_preview_size:
             return
         self._last_preview_size = preview_size
@@ -728,8 +756,9 @@ class MainWindow(QMainWindow):
 
     @Slot(int, int, int)
     def configure_exposure(self, minimum, maximum, current):
-        self.exposure.setRange(minimum, maximum)
-        self.exposure.setValue(current)
+        with QSignalBlocker(self.exposure):
+            self.exposure.setRange(minimum, maximum)
+            self.exposure.setValue(current)
         self.exposure.setEnabled(True)
         self.exposure_label.setText(f"{current} us")
 
@@ -742,6 +771,16 @@ class MainWindow(QMainWindow):
         self.low.set_limits(0, high - 1)
         self.high.set_limits(low + 1, 100)
         self.percentiles_requested.emit(low, high)
+
+    @Slot(int, int)
+    def update_frame_dimensions(self, width, height):
+        aspect = width / height
+        if aspect != self._source_aspect_ratio:
+            self._source_aspect_ratio = aspect
+            if self.demo_mode:
+                self._size_demo_layout()
+            else:
+                self._size_main_layout()
 
     @Slot(str)
     def show_camera_error(self, message):
@@ -892,6 +931,8 @@ class MainWindow(QMainWindow):
         )
 
     def refresh_visible(self):
+        if not self.demo_mode:
+            self._size_main_layout()
         for card in (
             (self.demo_cards + [self.demo_large]) if self.demo_mode else self.main_cards
         ):
@@ -925,7 +966,7 @@ class MainWindow(QMainWindow):
         if self.demo_mode:
             QTimer.singleShot(0, self._size_demo_layout)
         else:
-            QTimer.singleShot(0, self._request_preview_size)
+            QTimer.singleShot(0, self._size_main_layout)
 
     def closeEvent(self, event):
         self.gui_timer.stop()

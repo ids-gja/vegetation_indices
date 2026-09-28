@@ -20,9 +20,25 @@ def test_default_worker_uses_hardware_balanced_channels():
     worker = CameraWorker()
     raw = np.array([[10, 20], [40, 10]], dtype=np.uint16)
     values = worker._raw_indices(raw)
-    np.testing.assert_allclose(values["ndvi"], 1 / 3)
-    np.testing.assert_allclose(values["cvi"], 8)
+    np.testing.assert_allclose(values["ndvi"], 5 / 14)
+    np.testing.assert_allclose(values["cvi"], 10.6875)
     assert not hasattr(worker, "_calibration")
+
+
+def test_default_worker_subtracts_black_level_before_calling_core(monkeypatch):
+    worker = CameraWorker()
+    original = worker._default_processor.process_raw
+    core_inputs = []
+
+    def record_input(raw):
+        core_inputs.append(raw.copy())
+        return original(raw)
+
+    monkeypatch.setattr(worker._default_processor, "process_raw", record_input)
+    worker._raw_indices(np.array([[0, 3], [2, 1]], dtype=np.uint16))
+    assert len(core_inputs) == 1
+    np.testing.assert_array_equal(core_inputs[0], [[-2, 1], [0, -1]])
+    assert core_inputs[0].dtype == np.float32
 
 
 def test_default_window_has_no_calibration_controls(monkeypatch):

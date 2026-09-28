@@ -4,7 +4,7 @@ from importlib.resources import files
 
 import numpy as np
 from ids_peak import ids_peak
-from .library import (
+from calibration.library import (
     Calibration,
     HardwareGainLimits,
     calibrate_raw_white_target,
@@ -14,7 +14,6 @@ from ndvi_processing import (
     NDVIProcessor,
     SensorConfig,
 )
-
 
 CHANNELS = {"R": "red", "G": "green", "NIR": "blue"}
 

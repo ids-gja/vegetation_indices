@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 
-from .bayer import extract_channels, validate_cfa_pattern
-from .indices import calculate_indices
-from .spectral import load_filter_curve, load_relative_qe, plot_spectra
+from ndvi_processing.bayer import extract_channels, validate_cfa_pattern
+from ndvi_processing.indices import calculate_indices
+from ndvi_processing.spectral import load_filter_curve, load_relative_qe, plot_spectra
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -40,6 +40,7 @@ class SensorConfig:
     green_mode: str = "first"
     tvi_scale: float = 1.0
     hardware_gains: dict[str, float] | None = None
+    black_level: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,8 @@ class NDVIProcessor:
         self.calibration = calibration
         if calibration is not None:
             calibration.validate_hardware_gains(sensor.hardware_gains)
+        if not np.isfinite(sensor.black_level) or sensor.black_level < 0:
+            raise ValueError("black_level must be finite and nonnegative")
         validate_cfa_pattern(sensor.cfa_pattern)
         if not Path(sensor.relative_qe_csv).is_file():
             raise FileNotFoundError(sensor.relative_qe_csv)
@@ -91,6 +94,8 @@ class NDVIProcessor:
             if self.calibration is not None:
                 values = values - np.float32(self.calibration.offsets.get(name, 0.0))
                 values = values * np.float32(self.calibration.gains[name])
+            else:
+                values = values - np.float32(self.sensor.black_level)
             corrected[name] = values
 
         if self.calibration is not None and self.calibration.matrix is not None:

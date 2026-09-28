@@ -33,8 +33,12 @@ $env:PYTHONPATH = "src"
 python -m greenview_pro
 ```
 
-The demo uses the camera's hardware-balanced R/G/NIR Bayer channels as-is,
-without loading saved calibration or applying software white balance. To use
+The demo uses the camera's hardware-balanced R/G/NIR Bayer channels without
+loading saved calibration or applying software white balance. It sets the
+camera BlackLevel to 2 DN, sets the camera's Red, Green, and Blue (NIR-site)
+gains to 1.0, and verifies all four readbacks before acquisition. The live
+worker subtracts 2 DN from RAW Bayer values as floating-point numbers before
+passing them to the reusable index processor. To use
 white-target calibration on lighting setups without adjustable channel voltages,
 start `greenview-pro --calibration` (or `python -m greenview_pro --calibration`).
 Only this mode loads saved calibration, exposes the gear dialog, and applies
@@ -43,9 +47,12 @@ index values.
 
 ## Live preview performance
 
-The live processing path is capped at the active square image area's on-screen
-dimensions before calculating vegetation indices. It preserves the source aspect ratio,
-so the complete camera frame remains visible without distortion.
+The normal view packs four camera-aspect image cards with a 1 px gap and
+requests Bayer previews at twice their displayed dimensions. Index images,
+which have half the Bayer resolution, therefore retain approximately one
+calculated pixel per display pixel. Fullscreen requests only its displayed
+dimensions to keep the live demo responsive. Both views preserve the camera
+frame's aspect ratio.
 The app starts maximized, with exposure, contrast, snapshots, and fullscreen
 demo controls together in the top panel. Calibration controls appear only
 with `--calibration`.
@@ -53,11 +60,12 @@ with `--calibration`.
 Before starting acquisition, the camera sets `DeviceLinkThroughputLimit` to its
 maximum, temporarily minimizes exposure, and sets `AcquisitionFrameRate` to the
 highest rate allowed by `DeviceLinkAcquisitionFrameRateLimit` and the camera.
-It then sets exposure close to the frame period (`1,000,000 / FPS` microseconds).
-If the camera reports a lower attainable FPS at that exposure, the limit is
-reduced by the reported timing shortfall and the maximum FPS is reapplied.
-The exposure slider cannot exceed this FPS-preserving limit, but remains
-adjustable below it.
+It probes the FPS-preserving exposure limit (reducing it if the camera reports
+a timing shortfall), then starts acquisition at 3.5 ms or the closest supported
+value. On each connection, a one-time binary exposure search finds the brightest
+exposure with fewer than 1% saturated RAW pixels. The exposure slider cannot
+exceed the FPS-preserving limit; moving it stops the search and gives manual
+control.
 
 ## Configuration
 
@@ -69,7 +77,8 @@ title, subtitle, and three `[[facts]]`.
 In fullscreen, a ring beside the message tracks its display time, while a smooth
 bar along the main image tracks time until the next image rotates in. The main
 image and three stacked side images share an overall height and scale to the
-uncropped image aspect ratio, fitting the complete group within the window.
+original camera frame aspect ratio, fitting the complete group within the window
+without resizing as Bayer previews round to even pixel dimensions.
 
 ## Reusable vegetation calculations
 
@@ -84,10 +93,15 @@ from importlib.resources import files
 from ndvi_processing import NDVIProcessor, SensorConfig
 
 qe = files("ndvi_processing").joinpath("resources", "sensor_AR2020.csv")
-processor = NDVIProcessor(SensorConfig("AR2020", "GRBG", qe))
+processor = NDVIProcessor(SensorConfig("AR2020", "GRBG", qe, black_level=2))
 indices = processor.process_raw(raw_bayer_frame).indices
 ndvi, cvi, tvi = (indices[name] for name in ("ndvi", "cvi", "tvi"))
 ```
+
+Set `black_level` to the camera's actual DN setting (the standalone processor
+defaults to 0); the live worker already subtracts its camera's offset and
+passes `black_level=0` to the core. Calibrated processing uses its measured
+channel offsets instead.
 
 ## White-target calibration
 
@@ -105,7 +119,8 @@ hardware gains using the camera's `GainSelector`/`Gain` nodes, applies them and
 reads back the actual values. Keep exposure, illumination, BlackLevel, and target
 fixed, then capture the second white reference. After buffered frames are
 discarded, the app averages fresh raw frames, computes residual software gains,
-and stores the calibration in `~\.greenview_pro\calibration.json`.
+and stores the calibration in `~\.greenview_pro\calibration.json`. On reconnect
+the optional mode restores the calibration's recorded camera BlackLevel.
 
 The AR2020 sensor's Bayer pattern is GRBG. Its physical blue site is an NIR
 *proxy*, not a spectrally isolated NIR band. The reusable processor loads the

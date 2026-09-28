@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from greenview_pro.app import MainWindow
-from .worker import CalibratedCameraWorker
+from calibration.worker import CalibratedCameraWorker
 
 
 ICON_FILE = Path(__file__).resolve().parent / "resources" / "gear.svg"
