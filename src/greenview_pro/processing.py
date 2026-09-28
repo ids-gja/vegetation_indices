@@ -1,7 +1,7 @@
 """Camera acquisition and vegetation-index image processing."""
 
 import time
-from dataclasses import replace
+from importlib.resources import files
 from threading import Lock
 
 import cv2
@@ -9,10 +9,7 @@ import matplotlib
 import numpy as np
 from ids_peak import ids_peak, ids_peak_ipl_extension
 from PySide6.QtCore import QThread, Signal, Slot
-from vegetation_indices import (
-    CameraImageParameters,
-    calculate_vegetation_indices,
-)
+from ndvi_processing import NDVIProcessor, SensorConfig
 
 LOW_DEFAULT = 5
 HIGH_DEFAULT = 99
@@ -22,6 +19,46 @@ DEFAULT_PREVIEW_SIZE = (1280, 1280)
 _cmap = matplotlib.colormaps.get_cmap("RdYlGn").resampled(256)
 _colors = (_cmap(np.linspace(0, 1, 256))[:, :3] * 255).astype(np.uint8)
 COLORMAP = np.ascontiguousarray(_colors.reshape(256, 1, 3)[..., ::-1])
+
+
+def maximize_frame_rate(nodemap):
+    throughput = nodemap.FindNode("DeviceLinkThroughputLimit")
+    exposure = nodemap.FindNode("ExposureTime")
+    frame_rate = nodemap.FindNode("AcquisitionFrameRate")
+    throughput.SetValue(throughput.Maximum())
+    exposure.SetValue(exposure.Minimum())
+
+    link_limit = nodemap.FindNode("DeviceLinkAcquisitionFrameRateLimit")
+    target_fps = min(float(link_limit.Value()), float(frame_rate.Maximum()))
+    if not np.isfinite(target_fps) or target_fps <= 0:
+        raise ValueError(f"Camera reported an invalid maximum frame rate: {target_fps}")
+    frame_rate.SetValue(target_fps)
+    actual_fps = float(frame_rate.Value())
+    if not np.isfinite(actual_fps) or actual_fps <= 0:
+        raise ValueError(f"Camera reported an invalid frame rate: {actual_fps}")
+
+    minimum = int(np.ceil(exposure.Minimum()))
+    maximum = int(np.floor(min(exposure.Maximum(), 1_000_000 / actual_fps)))
+    if maximum < minimum:
+        raise ValueError("Maximum frame rate leaves no usable exposure range")
+    for _ in range(8):
+        exposure.SetValue(float(maximum))
+        supported_fps = min(float(frame_rate.Maximum()), float(link_limit.Value()))
+        if supported_fps >= actual_fps * (1 - 1e-5):
+            frame_rate.SetValue(min(actual_fps, float(frame_rate.Maximum())))
+            if min(float(frame_rate.Value()), float(link_limit.Value())) >= actual_fps * (
+                1 - 1e-5
+            ):
+                break
+        if not np.isfinite(supported_fps) or supported_fps <= 0 or maximum <= minimum:
+            raise ValueError("Camera cannot sustain the selected frame rate")
+        shortfall_us = int(
+            np.ceil(1_000_000 / supported_fps - 1_000_000 / actual_fps)
+        )
+        maximum = max(minimum, maximum - max(1, shortfall_us + 1))
+    else:
+        raise ValueError("Camera frame rate did not stabilize at maximum exposure")
+    return minimum, maximum, actual_fps
 
 
 def normalized(image, low, high):
@@ -104,7 +141,6 @@ class CameraWorker(QThread):
     state_changed = Signal(str, bool)
     exposure_range = Signal(int, int, int)
     recoverable_error = Signal(str)
-    white_balance_changed = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -115,13 +151,8 @@ class CameraWorker(QThread):
         # Session settings survive disconnect/reconnect and manual close/start.
         self._saved_exposure = None
         self._pending_exposure = None
-        # Host-side auto white balance. This is independent of the camera node
-        # BalanceWhiteAuto and therefore also works when that node is unavailable.
-        self._white_balance_mode = "Off"
-        self._pending_white_balance = None
-        self._wb_gains = np.ones(3, dtype=np.float32)  # red, green, blue
-        self._wb_once_frames_remaining = 0
-        self._wb_frame_counter = 0
+        self._exposure_min = None
+        self._exposure_cap = None
         self._library_open = False
         self._device = None
         self._remote = None
@@ -135,7 +166,9 @@ class CameraWorker(QThread):
         self._bounds_update_interval = 10
         self._bounds_smoothing = np.float32(0.25)
         self._preview_size = DEFAULT_PREVIEW_SIZE
-        self._image_parameters = CameraImageParameters()
+        qe = files("ndvi_processing").joinpath("resources", "sensor_AR2020.csv")
+        self._default_processor = NDVIProcessor(SensorConfig("AR2020", "GRBG", qe))
+        self._processor = self._default_processor
 
     def start_camera(self):
         self._wanted = True
@@ -155,22 +188,19 @@ class CameraWorker(QThread):
 
     @Slot(int)
     def set_exposure(self, value):
-        self._saved_exposure = int(value)
-        self._pending_exposure = int(value)
-
-    @Slot(str)
-    def set_white_balance(self, mode):
-        if mode in ("Off", "Once", "Continuous"):
-            self._pending_white_balance = mode
+        requested = int(value)
+        if self._exposure_cap is not None:
+            requested = max(self._exposure_min, min(requested, self._exposure_cap))
+        self._saved_exposure = requested
+        self._pending_exposure = requested
 
     @Slot(int, int)
     def set_preview_size(self, width, height):
         if width >= 2 and height >= 2:
             self._preview_size = (width, height)
 
-    def set_image_parameters(self, parameters):
-        """Apply calibration and Bayer metadata read from the active camera."""
-        self._image_parameters = parameters
+    def _raw_indices(self, raw):
+        return self._processor.process_raw(raw).indices
 
     def stop_worker(self):
         self._shutdown = True
@@ -189,12 +219,13 @@ class CameraWorker(QThread):
 
         self._device = devices[0].OpenDevice(ids_peak.DeviceAccessType_Control)
         self._remote = self._device.RemoteDevice().NodeMaps()[0]
+        exposure_minimum, exposure_maximum, _ = maximize_frame_rate(self._remote)
+        self._exposure_min = exposure_minimum
+        self._exposure_cap = exposure_maximum
         payload = self._remote.FindNode("PayloadSize").Value()
         exposure = self._remote.FindNode("ExposureTime")
-        exposure_minimum = int(np.ceil(exposure.Minimum()))
-        exposure_maximum = int(np.floor(exposure.Maximum()))
         if self._saved_exposure is None:
-            self._saved_exposure = int(exposure.Value())
+            self._saved_exposure = exposure_maximum
         else:
             self._saved_exposure = max(
                 exposure_minimum, min(self._saved_exposure, exposure_maximum)
@@ -204,9 +235,6 @@ class CameraWorker(QThread):
         self.exposure_range.emit(
             exposure_minimum, exposure_maximum, self._saved_exposure
         )
-
-        # Host white balance state is retained across reconnects.
-        self.white_balance_changed.emit(self._white_balance_mode)
 
         self._stream = self._device.DataStreams()[0].OpenDataStream()
         try:
@@ -223,7 +251,17 @@ class CameraWorker(QThread):
         node = self._remote.FindNode("AcquisitionStart")
         node.Execute()
         node.WaitUntilDone()
+        self._camera_opened()
         self.state_changed.emit("Camera connected", True)
+
+    def _camera_opened(self):
+        pass
+
+    def _frame_received(self, raw):
+        pass
+
+    def _check_processor(self):
+        pass
 
     def _close_camera(self):
         try:
@@ -244,6 +282,10 @@ class CameraWorker(QThread):
         self._stream = None
         self._remote = None
         self._device = None
+        self._camera_closed()
+
+    def _camera_closed(self):
+        pass
 
     def _close_library(self):
         self._close_camera()
@@ -254,58 +296,15 @@ class CameraWorker(QThread):
                 pass
             self._library_open = False
 
-    def _update_host_white_balance(self, red_raw, green_raw, blue_raw):
-        """Update gray-world gains from the central 80 percent of the Bayer image."""
-        height, width = red_raw.shape
-        y0, y1 = int(height * 0.1), max(int(height * 0.9), 1)
-        x0, x1 = int(width * 0.1), max(int(width * 0.9), 1)
-        channels = (
-            red_raw[y0:y1, x0:x1],
-            green_raw[y0:y1, x0:x1],
-            blue_raw[y0:y1, x0:x1],
-        )
-        means = np.array(
-            [float(np.mean(channel)) for channel in channels], dtype=np.float32
-        )
-        means = np.maximum(means, np.float32(1e-6))
-        target = float(np.mean(means))
-        requested = np.clip(target / means, 0.25, 4.0).astype(np.float32)
-        # Smooth updates to avoid visible pumping in continuous operation.
-        alpha = np.float32(0.35 if self._white_balance_mode == "Once" else 0.08)
-        self._wb_gains = (1.0 - alpha) * self._wb_gains + alpha * requested
-
     def _process(self, raw, fps):
         if raw.ndim != 2 or min(raw.shape) < 2:
             raise RuntimeError(
                 "The camera does not provide the expected 2D RAW Bayer image"
             )
         raw = raw[: raw.shape[0] // 2 * 2, : raw.shape[1] // 2 * 2]
-        self._wb_frame_counter += 1
-        if self._white_balance_mode == "Continuous":
-            if self._wb_frame_counter % 5 == 0:
-                blue_raw = raw[1::2, 0::2].astype(np.float32)
-                red_raw = raw[0::2, 1::2].astype(np.float32)
-                green_raw = raw[0::2, 0::2].astype(np.float32)
-                self._update_host_white_balance(red_raw, green_raw, blue_raw)
-        elif self._white_balance_mode == "Once" and self._wb_once_frames_remaining > 0:
-            blue_raw = raw[1::2, 0::2].astype(np.float32)
-            red_raw = raw[0::2, 1::2].astype(np.float32)
-            green_raw = raw[0::2, 0::2].astype(np.float32)
-            self._update_host_white_balance(red_raw, green_raw, blue_raw)
-            self._wb_once_frames_remaining -= 1
-            if self._wb_once_frames_remaining == 0:
-                self._white_balance_mode = "Off"
-                self.white_balance_changed.emit("Off")
-
-        parameters = replace(
-            self._image_parameters,
-            red_gain=float(self._wb_gains[0]),
-            green_gain=float(self._wb_gains[1]),
-            blue_gain=float(self._wb_gains[2]),
-        )
-        indices = calculate_vegetation_indices(raw, parameters)
-        ndvi_raw = indices.ndvi
-        cvi_raw = indices.cvi
+        indices = self._raw_indices(raw)
+        ndvi_raw = indices["ndvi"]
+        cvi_raw = indices["cvi"]
         self._normalization_frame += 1
         if (
             self._ndvi_bounds is None
@@ -370,11 +369,12 @@ class CameraWorker(QThread):
                         connected = True
                         last_frame = time.perf_counter()
                         smooth_fps = 0.0
-                    except Exception:
+                    except Exception as exc:
                         self._close_camera()
                         self.state_changed.emit(
                             "Camera disconnected - reconnecting...", False
                         )
+                        self.recoverable_error.emit(str(exc))
                         continue
 
                 try:
@@ -384,19 +384,12 @@ class CameraWorker(QThread):
                         )
                         self._saved_exposure = int(self._pending_exposure)
                         self._pending_exposure = None
-                    if self._pending_white_balance is not None:
-                        requested_mode = self._pending_white_balance
-                        self._pending_white_balance = None
-                        self._white_balance_mode = requested_mode
-                        if requested_mode == "Once":
-                            self._wb_once_frames_remaining = 12
-                        elif requested_mode == "Continuous":
-                            self._wb_once_frames_remaining = 0
-                        self.white_balance_changed.emit(requested_mode)
                     buffer = self._stream.WaitForFinishedBuffer(ids_peak.Timeout(1000))
                     try:
                         image = ids_peak_ipl_extension.BufferToImage(buffer)
-                        raw = preview_bayer(image.get_numpy_2D(), self._preview_size)
+                        full_raw = image.get_numpy_2D()
+                        self._frame_received(full_raw)
+                        raw = preview_bayer(full_raw, self._preview_size)
                     finally:
                         self._stream.QueueBuffer(buffer)
                     now = time.perf_counter()
@@ -405,6 +398,7 @@ class CameraWorker(QThread):
                         instant if smooth_fps == 0 else 0.9 * smooth_fps + 0.1 * instant
                     )
                     last_frame = now
+                    self._check_processor()
                     result = self._process(raw, smooth_fps)
                     with self._latest_lock:
                         self._latest = result

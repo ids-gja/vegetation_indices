@@ -22,8 +22,7 @@ greenview-pro = "greenview_pro.app:main"
 where = ["src"]
 namespaces = false
 
-[tool.setuptools.data-files]
-"greenview_pro" = ["src/config.toml"]
-"greenview_pro/icons" = ["src/icons/*.png"]
-"greenview_pro/images" = ["src/images/*.jpg"]
-"greenview_pro/messages" = ["src/messages/*.toml"]
+[tool.setuptools.package-data]
+ndvi_processing = ["resources/*.csv"]
+greenview_pro = ["resources/config.toml", "resources/icons/*", "resources/images/*.jpg", "resources/messages/*.toml"]
+calibration = ["resources/*.svg", "resources/*.toml"]

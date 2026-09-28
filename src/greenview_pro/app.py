@@ -1,12 +1,14 @@
 """Qt user interface for IDS GreenView Pro."""
 
-import cv2
-import numpy as np
+import argparse
+from datetime import datetime
 from pathlib import Path
 import sys
 import time
 import tomllib
-from datetime import datetime
+
+import cv2
+import numpy as np
 from PySide6.QtCore import (
     QEasingCurve,
     QParallelAnimationGroup,
@@ -17,7 +19,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -26,7 +28,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
-    QPushButton,
     QSizePolicy,
     QSlider,
     QStackedWidget,
@@ -39,16 +40,14 @@ from processing import HIGH_DEFAULT, LOW_DEFAULT, CameraWorker
 
 APP_NAME = "IDS GreenView Pro"
 VERSION = "3.1"
-DATA_DIR = Path(__file__).resolve().parents[1]
-if not (DATA_DIR / "config.toml").exists():
-    DATA_DIR = Path(sys.prefix) / "greenview_pro"
+DATA_DIR = Path(__file__).resolve().parent / "resources"
 ICON_DIR = DATA_DIR / "icons"
 COLOR_IMAGE_FILE = DATA_DIR / "images" / "color_image.jpg"
 CONFIG_FILE = DATA_DIR / "config.toml"
 MESSAGE_DIR = DATA_DIR / "messages"
-SNAPSHOT_DIR = DATA_DIR.parent / "snapshots"
+SNAPSHOT_DIR = Path.cwd() / "snapshots"
 GUI_INTERVAL_MS = 66
-MESSAGE_PROGRESS_INTERVAL_MS = 33
+MESSAGE_PROGRESS_INTERVAL_MS = 16
 VIEW_NAMES = ("REFERENCE IMAGE", "RAW", "NDVI", "CVI")
 
 
@@ -76,6 +75,7 @@ class ImageCard(QFrame):
         self.overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._array = None
         self._smooth = smooth
+        self.aspect_ratio = 1.0
 
     def set_image(self, array):
         self._array = array
@@ -86,6 +86,10 @@ class ImageCard(QFrame):
         self.image.setPixmap(QPixmap())
         self.image.setText("Waiting for image...")
         self.overlay.hide()
+
+    def set_aspect_ratio(self, ratio):
+        self.aspect_ratio = ratio
+        self._size_image()
 
     def _refresh(self):
         if self._array is None or self.image.width() < 2 or self.image.height() < 2:
@@ -109,9 +113,20 @@ class ImageCard(QFrame):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        side = min(self.contentsRect().width(), self.contentsRect().height())
-        if side >= 2 and self.image.size() != QSize(side, side):
-            self.image.setFixedSize(side, side)
+        self._size_image()
+
+    def _size_image(self):
+        width = self.contentsRect().width()
+        height = self.contentsRect().height()
+        image_size = QSize(
+            min(width, round(height * self.aspect_ratio)),
+            min(height, round(width / self.aspect_ratio)),
+        )
+        if (
+            min(image_size.width(), image_size.height()) >= 2
+            and self.image.size() != image_size
+        ):
+            self.image.setFixedSize(image_size)
         self._refresh()
 
 
@@ -136,8 +151,8 @@ class PercentControl(QFrame):
         for button in (self.up, self.down):
             button.setObjectName("arrow")
             button.setFixedSize(20, 15)
-        self.up.setIcon(load_icon("arrow_up.png"))
-        self.down.setIcon(load_icon("arrow_down.png"))
+        self.up.setIcon(load_icon("arrow_up.svg"))
+        self.down.setIcon(load_icon("arrow_down.svg"))
         self.up.setIconSize(QSize(14, 9))
         self.down.setIconSize(QSize(14, 9))
         self.up.clicked.connect(self.increase)
@@ -192,7 +207,7 @@ class InfoRow(QWidget):
 
 
 class MessageProgressIndicator(QWidget):
-    """A pie-shaped indicator showing time remaining until the next message."""
+    """A ring showing time elapsed until the next message."""
 
     def __init__(self, color):
         super().__init__()
@@ -207,24 +222,47 @@ class MessageProgressIndicator(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#D9E2E3"))
-        painter.drawEllipse(self.rect().adjusted(1, 1, -1, -1))
-        painter.setBrush(self._color)
-        painter.drawPie(
-            self.rect().adjusted(1, 1, -1, -1),
+        painter.setBrush(Qt.NoBrush)
+        bounds = self.rect().adjusted(2, 2, -2, -2)
+        painter.setPen(QPen(QColor("#D9E2E3"), 3))
+        painter.drawEllipse(bounds)
+        painter.setPen(QPen(self._color, 3))
+        painter.drawArc(
+            bounds,
             90 * 16,
             -round(self._progress * 360 * 16),
         )
 
 
+class ViewProgressIndicator(QWidget):
+    """Subpixel-accurate elapsed-time bar for the image slideshow."""
+
+    def __init__(self, color, parent=None):
+        super().__init__(parent)
+        self._color = QColor(color)
+        self._progress = 0.0
+        self.setFixedHeight(6)
+
+    def set_progress(self, progress):
+        self._progress = max(0.0, min(float(progress), 1.0))
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#D9E2E3"))
+        painter.fillRect(
+            0.0, 0.0, self.width() * self._progress, float(self.height()), self._color
+        )
+
+
 class MainWindow(QMainWindow):
+    worker_class = CameraWorker
     start_requested = Signal()
     close_requested = Signal()
     exposure_requested = Signal(int)
     percentiles_requested = Signal(int, int)
     preview_size_requested = Signal(int, int)
-    white_balance_requested = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -232,6 +270,7 @@ class MainWindow(QMainWindow):
         self.resize(1600, 950)
         self.demo_mode = False
         self._normal_geometry = None
+        self._was_maximized = False
         self._last_images = None
         self._last_gui_version = -1
         self._marketing_index = 0
@@ -241,10 +280,12 @@ class MainWindow(QMainWindow):
         self.marketing_settings, self.marketing_messages = self.load_marketing()
         self._view_spacing = max(0, int(self.marketing_settings.get("VIEW_SPACING", 1)))
         self._message_cycle_started = None
+        self._view_cycle_started = None
+        self._demo_aspect_ratio = None
         self.color_image = cv2.imread(str(COLOR_IMAGE_FILE))
         self._build()
         self._style()
-        self.worker = CameraWorker()
+        self.worker = self.worker_class()
         self.worker.state_changed.connect(self.update_state)
         self.worker.exposure_range.connect(self.configure_exposure)
         self.start_requested.connect(self.worker.start_camera)
@@ -252,7 +293,7 @@ class MainWindow(QMainWindow):
         self.exposure_requested.connect(self.worker.set_exposure)
         self.percentiles_requested.connect(self.worker.set_percentiles)
         self.preview_size_requested.connect(self.worker.set_preview_size)
-        self.white_balance_requested.connect(self.worker.set_white_balance)
+        self.worker.recoverable_error.connect(self.show_camera_error)
         self.worker.start()
         self.gui_timer = QTimer(self)
         self.gui_timer.setInterval(GUI_INTERVAL_MS)
@@ -265,7 +306,9 @@ class MainWindow(QMainWindow):
         self.marketing_timer.timeout.connect(self.next_message)
         self.message_progress_timer = QTimer(self)
         self.message_progress_timer.setInterval(MESSAGE_PROGRESS_INTERVAL_MS)
+        self.message_progress_timer.setTimerType(Qt.PreciseTimer)
         self.message_progress_timer.timeout.connect(self._update_message_progress)
+        self.message_progress_timer.timeout.connect(self._update_view_progress)
         self.view_timer = QTimer(self)
         self.view_timer.setInterval(
             int(float(self.marketing_settings.get("VIEW_ROTATION_SECONDS", 5)) * 1000)
@@ -311,9 +354,11 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(self.main_page)
         root.setContentsMargins(18, 14, 18, 8)
         root.setSpacing(8)
-        header = QHBoxLayout()
+        controls = QFrame()
+        controls.setObjectName("controls")
+        bar = QHBoxLayout(controls)
         logo = QLabel()
-        logo.setFixedSize(170, 52)
+        logo.setFixedSize(140, 44)
         logo_path = ICON_DIR / "ids-logo_black_rgb.png"
         if logo_path.exists():
             logo.setPixmap(
@@ -325,23 +370,9 @@ class MainWindow(QMainWindow):
             logo.setText("IDS")
         title = QLabel("GreenView Pro")
         title.setObjectName("title")
-        self.demo_button = QPushButton("Demo Preview")
-        self.demo_button.clicked.connect(self.enter_demo)
-        header.addWidget(logo)
-        header.addWidget(title)
-        header.addStretch()
-        header.addWidget(self.demo_button)
-        root.addLayout(header)
-        self.main_cards = self._make_cards()
-        self._add_grid(
-            root,
-            self.main_cards,
-            margin=self._view_spacing,
-            spacing=self._view_spacing,
-        )
-        controls = QFrame()
-        controls.setObjectName("controls")
-        bar = QHBoxLayout(controls)
+        bar.addWidget(logo)
+        bar.addWidget(title)
+        bar.addSpacing(16)
         bar.addWidget(QLabel("Exposure"))
         self.exposure = QSlider(Qt.Horizontal)
         self.exposure.setEnabled(False)
@@ -357,10 +388,32 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.low)
         bar.addWidget(QLabel("to"))
         bar.addWidget(self.high)
-        self.snapshot_button = QPushButton("Save snapshot")
+        self.snapshot_button = QToolButton()
+        self.snapshot_button.setIcon(load_icon("save.svg"))
+        self.snapshot_button.setIconSize(QSize(22, 22))
+        self.snapshot_button.setFixedSize(36, 36)
+        self.snapshot_button.setToolTip("Save snapshot")
+        self.snapshot_button.setAccessibleName("Save snapshot")
         self.snapshot_button.clicked.connect(self.save_snapshot)
         bar.addWidget(self.snapshot_button)
+        self.camera_status = QLabel("Connecting camera...")
+        bar.addWidget(self.camera_status)
+        self.demo_button = QToolButton()
+        self.demo_button.setIcon(load_icon("fullscreen.svg"))
+        self.demo_button.setIconSize(QSize(22, 22))
+        self.demo_button.setFixedSize(36, 36)
+        self.demo_button.setToolTip("Demo Preview (fullscreen)")
+        self.demo_button.setAccessibleName("Demo Preview (fullscreen)")
+        self.demo_button.clicked.connect(self.enter_demo)
+        bar.addWidget(self.demo_button)
         root.addWidget(controls)
+        self.main_cards = self._make_cards()
+        self._add_grid(
+            root,
+            self.main_cards,
+            margin=self._view_spacing,
+            spacing=self._view_spacing,
+        )
 
     def _build_demo(self):
         root = QVBoxLayout(self.demo_page)
@@ -417,6 +470,12 @@ class MainWindow(QMainWindow):
         middle.setSpacing(self._view_spacing)
         self.demo_large = ImageCard(VIEW_NAMES[self._display_view_index], smooth=True)
         middle.addWidget(self.demo_large)
+        self.view_progress = ViewProgressIndicator(
+            self.marketing_settings.get("ACCENT_COLOR", "#008A96"),
+            self.demo_large,
+        )
+        self.view_progress.setObjectName("viewProgress")
+        self.view_progress.setAccessibleName("Image slideshow progress")
         self.demo_reference = QWidget()
         refs = QVBoxLayout(self.demo_reference)
         refs.setContentsMargins(0, 0, 0, 0)
@@ -465,24 +524,43 @@ class MainWindow(QMainWindow):
         size = screen.size() if screen else self.size()
         sw = max(1, size.width())
         sh = max(1, size.height())
-        header_h = 160
-        footer_h = 160
-        reserve = 40
+        aspect = self._demo_image_aspect()
+        self._demo_aspect_ratio = aspect
+        header_h = 130
+        footer_h = 140
+        reserve = 12
         available = max(1, sh - reserve - header_h - footer_h)
-        raster_side = min(
+        gap = max(12, self._view_spacing)
+        raster_h = min(
             available,
-            max(
-                1,
-                (3 * (sw - self._view_spacing) + 2 * self._view_spacing) // 4,
-            ),
+            max(1, int((sw - 24 - gap) * 3 / (4 * aspect))),
         )
-        sidebar_side = max(1, (raster_side - 2 * self._view_spacing) // 3)
-        raster_w = raster_side + self._view_spacing + sidebar_side
+        while raster_h > 1:
+            large_w = round(raster_h * aspect)
+            sidebar_h = max(1, (raster_h - 2 * self._view_spacing) // 3)
+            sidebar_w = round(sidebar_h * aspect)
+            if large_w + gap + sidebar_w <= sw - 24:
+                break
+            raster_h -= 1
+        large_w = round(raster_h * aspect)
+        sidebar_h = max(1, (raster_h - 2 * self._view_spacing) // 3)
+        sidebar_w = round(sidebar_h * aspect)
         self.demo_header.setFixedHeight(header_h)
         self.demo_footer.setFixedHeight(footer_h)
-        self.demo_middle.setFixedSize(raster_w, raster_side)
-        self.demo_large.setFixedSize(raster_side, raster_side)
-        self.demo_reference.setFixedSize(sidebar_side, raster_side)
+        self.demo_middle.layout().setSpacing(gap)
+        self.demo_middle.setFixedSize(large_w + gap + sidebar_w, raster_h)
+        self.demo_large.set_aspect_ratio(aspect)
+        self.demo_large.setFixedSize(large_w, raster_h)
+        self.demo_reference.setFixedSize(sidebar_w, raster_h)
+        for card in self.demo_cards:
+            card.set_aspect_ratio(aspect)
+        self.view_progress.setGeometry(
+            0,
+            raster_h - self.view_progress.height(),
+            large_w,
+            self.view_progress.height(),
+        )
+        self.view_progress.raise_()
         logo_w, logo_h = 285, 93
         self.demo_logo.setFixedSize(logo_w, logo_h)
         self.demo_header_balance.setFixedWidth(logo_w)
@@ -504,6 +582,11 @@ class MainWindow(QMainWindow):
         for card in self.demo_cards + [self.demo_large]:
             card.IMAGE_MARGIN = 12
         self._request_preview_size()
+
+    def _demo_image_aspect(self):
+        raw = self._last_images[0] if self._last_images is not None else None
+        image = raw if raw is not None else self.color_image
+        return image.shape[1] / image.shape[0] if image is not None else 4 / 3
 
     def _request_preview_size(self):
         cards = [self.demo_large] if self.demo_mode else self.main_cards[1:]
@@ -636,6 +719,8 @@ class MainWindow(QMainWindow):
         self._last_gui_version = version
         self._last_images = result
         if self.demo_mode:
+            if self._demo_aspect_ratio != self._demo_image_aspect():
+                self._size_demo_layout()
             self._refresh_demo_views()
         else:
             for card, image in zip(self.main_cards[1:], result):
@@ -658,16 +743,22 @@ class MainWindow(QMainWindow):
         self.high.set_limits(low + 1, 100)
         self.percentiles_requested.emit(low, high)
 
+    @Slot(str)
+    def show_camera_error(self, message):
+        self.camera_status.setText(message)
+
     @Slot(str, bool)
     def update_state(self, text, connected):
-        pass
+        self.camera_status.setText(text)
 
     def enter_demo(self):
         self.demo_mode = True
+        self._was_maximized = self.isMaximized()
         self._normal_geometry = self.normalGeometry()
         self.stack.setCurrentWidget(self.demo_page)
         self.showFullScreen()
         self.marketing_timer.start()
+        self._restart_view_progress()
         self.view_timer.start()
         self._restart_message_progress()
         self.message_progress_timer.start()
@@ -680,9 +771,17 @@ class MainWindow(QMainWindow):
         self.message_progress_timer.stop()
         self.view_timer.stop()
         self.message_progress.set_progress(0)
+        self.view_progress.set_progress(0)
         self.stack.setCurrentWidget(self.main_page)
-        self.showNormal()
-        if self._normal_geometry and self._normal_geometry.isValid():
+        if self._was_maximized:
+            self.showMaximized()
+        else:
+            self.showNormal()
+        if (
+            not self._was_maximized
+            and self._normal_geometry
+            and self._normal_geometry.isValid()
+        ):
             self.setGeometry(self._normal_geometry)
         QTimer.singleShot(100, self.refresh_visible)
 
@@ -698,21 +797,37 @@ class MainWindow(QMainWindow):
     def _refresh_demo_views(self):
         images = self._view_images()
         selected_name = VIEW_NAMES[self._display_view_index]
-        self.demo_large.overlay.setText(selected_name)
+        self.demo_large.overlay.setText(self.view_title(selected_name))
         selected_image = images[selected_name]
         if selected_image is not None:
             self.demo_large.set_image(selected_image)
 
         side_names = [name for name in VIEW_NAMES if name != selected_name]
         for card, name in zip(self.demo_cards, side_names):
-            card.overlay.setText(name)
+            card.overlay.setText(self.view_title(name))
             image = images[name]
             if image is not None:
                 card.set_image(image)
 
+    def view_title(self, name):
+        return name
+
     def next_view(self):
         self._display_view_index = (self._display_view_index + 1) % len(VIEW_NAMES)
         self._refresh_demo_views()
+        self._restart_view_progress()
+
+    def _restart_view_progress(self):
+        self._view_cycle_started = time.monotonic()
+        self.view_progress.set_progress(0)
+
+    def _update_view_progress(self):
+        if self._view_cycle_started is None:
+            return
+        duration = self.view_timer.interval() / 1000
+        self.view_progress.set_progress(
+            (time.monotonic() - self._view_cycle_started) / duration
+        )
 
     def apply_message(self):
         message = self.marketing_messages[self._marketing_index]
@@ -826,11 +941,22 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
-def main():
-    app = QApplication(sys.argv)
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="IDS GreenView Pro live demo")
+    parser.add_argument(
+        "--calibration", action="store_true", help="Enable white-target calibration"
+    )
+    args = parser.parse_args(argv)
+    if args.calibration:
+        from calibration.ui import CalibrationWindow
+
+        window_class = CalibrationWindow
+    else:
+        window_class = MainWindow
+    app = QApplication(sys.argv[:1])
     app.setApplicationName(APP_NAME)
-    window = MainWindow()
-    window.show()
+    window = window_class()
+    window.showMaximized()
     sys.exit(app.exec())
 
 
