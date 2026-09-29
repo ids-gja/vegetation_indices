@@ -20,6 +20,7 @@ CONTROLS = (
     "camera_off",
     "fullscreen",
     "save",
+    "gear",
 )
 
 
@@ -51,4 +52,4 @@ def test_wheel_packages_vectors_and_the_original_logo_only():
     icon_files = project["tool"]["setuptools"]["package-data"]["greenview_pro"]
     assert "resources/icons/*" in icon_files
     assert (ICON_DIR / "ids-logo_black_rgb.png").exists()
-    assert not (ICON_DIR / "gear.svg").exists()
+    assert (ICON_DIR / "gear.svg").exists()

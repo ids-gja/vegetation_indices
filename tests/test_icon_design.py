@@ -40,20 +40,20 @@ def test_save_has_rectangular_slot_and_circular_opening():
     assert image.pixelColor(48, 80).alpha() > 0  # beneath the circle
 
 
-def test_save_and_calibration_are_matching_accessible_icon_buttons(monkeypatch):
+def test_save_and_settings_are_matching_accessible_icon_buttons(monkeypatch):
     monkeypatch.setattr(CalibrationWindow.worker_class, "start", lambda self: None)
     application = QApplication.instance() or QApplication([])
     window = CalibrationWindow()
     try:
         for button, label in (
             (window.snapshot_button, "Save snapshot"),
-            (window.calibration_button, "Calibrate camera"),
+            (window.settings_button, "Settings"),
         ):
             assert isinstance(button, QToolButton)
             assert button.text() == ""
             assert button.toolTip() == label
             assert button.accessibleName() == label
             assert not button.icon().isNull()
-        assert window.snapshot_button.iconSize() == window.calibration_button.iconSize()
+        assert window.snapshot_button.iconSize() == window.settings_button.iconSize()
     finally:
         window.close()

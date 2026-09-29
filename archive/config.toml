@@ -1,0 +1,8 @@
+# Camera exposure in microseconds; clamped to the camera's supported range.
+exposure_time = 10270
+
+# Display contrast percentiles (0-100), independent for each index.
+ndvi_percentile_lower = 25
+ndvi_percentile_upper = 80
+cvi_percentile_lower = 11
+cvi_percentile_upper = 60

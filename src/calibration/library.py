@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
 
@@ -148,7 +148,7 @@ def suggest_hardware_gains(
     current_gains: dict[str, float],
     *,
     offsets: dict[str, float] | None = None,
-    green_mode: str = "first",
+    green_mode: str = "mean",
     target: float | None = None,
 ) -> dict[str, float]:
     """Stage one: recommend absolute quantized gains from a raw white-target frame.
@@ -211,12 +211,13 @@ def calibrate_raw_white_target(
     hardware_gains: dict[str, float],
     reference: float = 1.0,
     offsets: dict[str, float] | None = None,
-    green_mode: str = "first",
+    green_mode: str = "mean",
 ) -> Calibration:
     """Stage two: calibrate a fresh raw frame after setting and reading back gains."""
-    return calibrate_white_target(
+    result = calibrate_white_target(
         extract_channels(raw, cfa_pattern, green_mode),
         reference=reference,
         offsets=offsets,
         hardware_gains=hardware_gains,
     )
+    return replace(result, metadata={**result.metadata, "green_mode": green_mode})

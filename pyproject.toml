@@ -25,4 +25,4 @@ namespaces = false
 [tool.setuptools.package-data]
 ndvi_processing = ["resources/*.csv"]
 greenview_pro = ["resources/config.toml", "resources/icons/*", "resources/images/*.jpg", "resources/messages/*.toml"]
-calibration = ["resources/*.svg", "resources/*.toml"]
+calibration = ["config.toml"]

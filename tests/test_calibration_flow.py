@@ -114,6 +114,15 @@ def test_two_stage_calibration_uses_readbacks_and_black_level():
     assert calibrated.gains == {"R": 0.025, "G": 0.025, "NIR": 0.025}
 
 
+def test_white_target_uses_both_green_sites_for_gain_calculation():
+    controls = GainControls(FakeMap())
+    raw = np.array([[12, 22], [42, 32]], dtype=np.float32)
+    requested = recommend_gains(raw, controls, black_level=2.0)
+    assert requested == {"R": 2.0, "G": 2.0, "NIR": 1.0}
+    calibrated = finish_calibration(raw, controls, black_level=2.0)
+    assert calibrated.gains["G"] == pytest.approx(1 / 20)
+
+
 def test_gain_entries_are_discovered_from_the_camera():
     nodes = FakeMap(("DigitalRed", "analogGreen", "NirBlue", "Global"))
     controls = GainControls(nodes)

@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 import greenview_pro.processing as processing
@@ -95,6 +96,66 @@ def test_worker_never_requests_exposure_above_frame_rate_cap():
     assert worker._pending_exposure == 69_444
 
 
+def test_manual_exposure_change_starts_new_temporal_history():
+    worker = CameraWorker()
+    original = worker._default_processor.process_channels
+    observed = []
+
+    def record(channels):
+        observed.append(channels["NIR"][0, 0])
+        return original(channels)
+
+    worker._default_processor.process_channels = record
+    base = np.tile(np.array([[40, 20], [30, 40]], dtype=np.uint16), (2, 2))
+    brighter = base.copy()
+    brighter[1, 0] = 70
+    worker._process(base, 0)
+    worker.set_exposure(2400)
+    worker._process(brighter, 0)
+    worker._process(brighter, 0)
+    assert observed == [28, 68, 68]
+    worker._close_camera()
+    worker._process(base, 0)
+    assert observed[-1] == 28
+
+
+def test_auto_exposure_change_does_not_blend_previous_exposure_into_next_frame():
+    worker = CameraWorker()
+    observed = []
+    original = worker._default_processor.process_channels
+
+    def record(channels):
+        observed.append(channels["NIR"][0, 0])
+        return original(channels)
+
+    worker._default_processor.process_channels = record
+    base = np.tile(np.array([[40, 20], [30, 40]], dtype=np.uint16), (2, 2))
+    brighter = base.copy()
+    brighter[1, 0] = 70
+    worker._process(base, 0)
+    worker._auto_exposure = SimpleNamespace(
+        done=False, safe=1000, exposure=1000, observe=lambda raw: 2000
+    )
+    worker._exposure_min = 10
+    worker._exposure_cap = 10_000
+    worker._camera.set_exposure = lambda requested: requested
+    assert worker._advance_auto_exposure(base)
+    worker._process(base, 0)
+    worker._process(brighter, 0)
+    assert observed == [28, 28, 68]
+
+
+def test_filter_setting_is_applied_by_worker_between_frames(monkeypatch):
+    worker = CameraWorker()
+    monkeypatch.setattr(worker, "isRunning", lambda: True)
+    worker.set_temporal_filter(False, 0.5)
+    assert worker._frame_processor.temporal_enabled
+    raw = np.tile(np.array([[40, 20], [30, 40]], dtype=np.uint16), (2, 2))
+    worker._process(raw, 0)
+    assert not worker._frame_processor.temporal_enabled
+    assert worker._frame_processor.temporal_weight == 0.5
+
+
 def test_connection_starts_acquisition_only_after_initial_exposure_and_black_level(monkeypatch):
     camera = FakeCamera()
     camera.black = FakeNode(0, 0, 10, camera.events, "black")
@@ -137,6 +198,70 @@ def test_connection_starts_acquisition_only_after_initial_exposure_and_black_lev
     worker._open_camera()
     assert worker._auto_exposure.exposure == 3500
     assert worker._auto_settle_frames == 2
+
+
+def test_reconnecting_does_not_restart_autoexposure_or_reset_its_last_exposure(monkeypatch):
+    camera = FakeCamera()
+    gains = FakeMap()
+    original_find = camera.FindNode
+    camera.FindNode = lambda name: (
+        gains.FindNode(name) if name in ("GainSelector", "Gain", "BlackLevel")
+        else SimpleNamespace(Value=lambda: 1024) if name == "PayloadSize"
+        else SimpleNamespace(Execute=lambda: None, WaitUntilDone=lambda: None)
+        if name in ("AcquisitionStart", "AcquisitionStop")
+        else original_find(name)
+    )
+    mode = SimpleNamespace(SetCurrentEntry=lambda value: None)
+    stream = SimpleNamespace(
+        NodeMaps=lambda: [SimpleNamespace(FindNode=lambda name: mode)],
+        NumBuffersAnnouncedMinRequired=lambda: 1,
+        AllocAndAnnounceBuffer=lambda payload: object(),
+        QueueBuffer=lambda buffer: None,
+        StartAcquisition=lambda: None,
+        StopAcquisition=lambda: None,
+        Flush=lambda mode: None,
+        AnnouncedBuffers=lambda: [],
+    )
+    device = SimpleNamespace(
+        RemoteDevice=lambda: SimpleNamespace(NodeMaps=lambda: [camera]),
+        DataStreams=lambda: [SimpleNamespace(OpenDataStream=lambda: stream)],
+    )
+    manager = SimpleNamespace(
+        Update=lambda: None,
+        Devices=lambda: [SimpleNamespace(OpenDevice=lambda access: device)],
+    )
+    monkeypatch.setattr(
+        processing.ids_peak, "DeviceManager",
+        SimpleNamespace(Instance=lambda: manager),
+    )
+    monkeypatch.setattr(
+        processing.ids_peak, "Library",
+        SimpleNamespace(Initialize=lambda: None),
+    )
+
+    manual_worker = CameraWorker()
+    manual_worker.set_exposure(2100)
+    manual_worker._open_camera()
+    assert manual_worker._auto_exposure is None
+    assert camera.exposure.Value() == 2100
+    manual_worker._close_camera()
+
+    worker = CameraWorker()
+    worker._open_camera()
+    worker._auto_settle_frames = 0
+    worker._advance_auto_exposure(np.full((8, 8), 100, dtype=np.uint16))
+    exposure_after_search = worker._saved_exposure
+    assert exposure_after_search > 3500
+    worker._close_camera()
+    worker._open_camera()
+    assert worker._auto_exposure is None
+    assert camera.exposure.Value() == exposure_after_search
+
+    worker.set_exposure(2100)
+    worker._close_camera()
+    worker._open_camera()
+    assert worker._auto_exposure is None
+    assert camera.exposure.Value() == 2100
 
 
 def assert_start_settings(camera, gains):

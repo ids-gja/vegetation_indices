@@ -37,8 +37,7 @@ class SensorConfig:
     cfa_pattern: str
     relative_qe_csv: str | Path
     filter_csv: str | Path | None = None
-    green_mode: str = "first"
-    tvi_scale: float = 1.0
+    green_mode: str = "mean"
     hardware_gains: dict[str, float] | None = None
     black_level: float = 0.0
 
@@ -85,9 +84,16 @@ class NDVIProcessor:
         )
 
     def process_raw(self, raw: np.ndarray) -> IndexResult:
-        channels = extract_channels(
-            raw, self.sensor.cfa_pattern, green_mode=self.sensor.green_mode
+        return self.process_channels(
+            extract_channels(
+                raw, self.sensor.cfa_pattern, green_mode=self.sensor.green_mode
+            )
         )
+
+    def process_channels(self, channels: dict[str, np.ndarray]) -> IndexResult:
+        """Calculate indices from aligned, optionally resampled float R/G/NIR planes."""
+        if set(channels) != {"R", "G", "NIR"}:
+            raise ValueError("channels must contain R, G, and NIR")
         corrected = {}
         for name in ("R", "G", "NIR"):
             values = np.asarray(channels[name], dtype=np.float32)
@@ -114,9 +120,6 @@ class NDVIProcessor:
             green=corrected["G"],
             nir=corrected["NIR"],
             indices=calculate_indices(
-                corrected["R"],
-                corrected["G"],
-                corrected["NIR"],
-                tvi_scale=self.sensor.tvi_scale,
+                corrected["R"], corrected["G"], corrected["NIR"]
             ),
         )

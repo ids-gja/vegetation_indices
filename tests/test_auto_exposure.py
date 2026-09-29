@@ -18,7 +18,7 @@ def new_search(minimum=18, maximum=10_000):
 
 
 def frame_for(exposure, clip_at):
-    raw = np.full((64, 64), 500, dtype=np.uint16)
+    raw = np.full((64, 64), 100, dtype=np.uint16)
     if exposure >= clip_at:
         raw[0::2, 1::2] = 4095
     return raw
@@ -45,10 +45,41 @@ def test_binary_search_checks_all_bayer_sites_for_clipping():
 
 def test_binary_search_counts_clipping_across_the_entire_raw_frame():
     search = new_search()
-    raw = np.full((64, 64), 500, dtype=np.uint16)
+    raw = np.full((64, 64), 100, dtype=np.uint16)
     raw[2::4, 2::4] = 4095
     search.observe(raw)
     assert search.exposure < 3500
+
+
+def test_autoexposure_limits_clipped_pixels_to_less_than_point_one_percent():
+    search = new_search()
+    raw = np.full((100, 100), 100, dtype=np.uint8)
+    raw.ravel()[:10] = 255
+    search.observe(raw)
+    assert search.exposure < 3500
+
+
+def test_autoexposure_uses_selected_sensor_bit_depth():
+    from greenview_pro.auto_exposure import ExposureSearch
+
+    raw = np.full((100, 100), 100, dtype=np.uint16)
+    raw.ravel()[:10] = 4095
+    search = ExposureSearch(18, 10000, 3500, white_level=4095)
+    search.observe(raw)
+    assert search.exposure < 3500
+
+
+def test_camera_white_level_uses_pixel_format_when_available():
+    from types import SimpleNamespace
+    from greenview_pro.camera import sensor_white_level
+
+    for name, expected in (("BayerGR8", 255), ("BayerGR12p", 4095)):
+        camera = SimpleNamespace(
+            FindNode=lambda _: SimpleNamespace(
+                CurrentEntry=lambda: SimpleNamespace(SymbolicValue=lambda: name)
+            )
+        )
+        assert sensor_white_level(camera) == expected
 
 
 def test_binary_search_selects_upper_cap_if_no_pixels_clip():
@@ -71,10 +102,10 @@ def test_worker_starts_at_three_point_five_ms_and_subtracts_two_dn():
     assert worker._default_processor.sensor.black_level == 0
     np.testing.assert_allclose(worker._raw_indices(raw)["ndvi"], [[1 / 3]])
     np.testing.assert_array_equal(indices.red, [[10]])
-    np.testing.assert_array_equal(indices.green, [[2]])
+    np.testing.assert_array_equal(indices.green, [[4]])
     np.testing.assert_array_equal(indices.nir, [[20]])
     np.testing.assert_allclose(indices.indices["ndvi"], [[1 / 3]])
-    np.testing.assert_allclose(indices.indices["cvi"], [[50]])
+    np.testing.assert_allclose(indices.indices["cvi"], [[12.5]])
 
 
 def test_programmatic_exposure_updates_do_not_cancel_autoexposure(monkeypatch):
@@ -151,7 +182,7 @@ def test_calibration_offsets_are_not_subtracted_twice():
         np.array([[4, 12], [22, 8]], dtype=np.uint16)
     )
     np.testing.assert_array_equal(corrected.red, [[10]])
-    np.testing.assert_array_equal(corrected.green, [[2]])
+    np.testing.assert_array_equal(corrected.green, [[4]])
     np.testing.assert_array_equal(corrected.nir, [[20]])
 
 

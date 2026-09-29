@@ -53,6 +53,7 @@ def test_auxiliary_gain_is_applied_saved_restored_and_checked(tmp_path, monkeypa
     for _ in range(11):
         worker._advance_calibration(np.full((2, 2), 42, dtype=np.uint16))
     calibration = Calibration.load(processing.CALIBRATION_FILE)
+    assert calibration.metadata["green_mode"] == "mean"
     assert calibration.metadata["auxiliary_gain_selector"] == "AnalogAll"
     assert float(calibration.metadata["auxiliary_gain_value"]) == 2.5
     worker._remote.gain.values["AnalogAll"] = 1.0
@@ -116,6 +117,7 @@ def test_saved_calibration_restores_its_black_level_after_default_camera_startup
     calibration = Calibration(
         {"R": 1, "G": 1, "NIR": 1},
         offsets={"R": 4.0, "G": 4.0, "NIR": 4.0},
+        metadata={"green_mode": "mean"},
         hardware_gains=worker._controls().read(),
     )
     calibration.save(processing.CALIBRATION_FILE)
@@ -123,3 +125,12 @@ def test_saved_calibration_restores_its_black_level_after_default_camera_startup
     assert worker._remote.black.Value() == 4
     assert worker._black_level == 4
     worker._validate_calibration()
+
+
+def test_saved_first_green_calibration_requires_recapture(tmp_path, monkeypatch):
+    monkeypatch.setattr(processing, "CALIBRATION_FILE", tmp_path / "calibration.json")
+    Calibration({"R": 1, "G": 1, "NIR": 1}).save(processing.CALIBRATION_FILE)
+    worker = CameraWorker()
+    worker._remote = FakeMap()
+    with pytest.raises(ValueError, match="recalibrate"):
+        worker._load_calibration()

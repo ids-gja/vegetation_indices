@@ -17,7 +17,7 @@ def validate_cfa_pattern(cfa_pattern: str) -> None:
 def extract_channels(
     raw: np.ndarray,
     cfa_pattern: str,
-    green_mode: str = "first",
+    green_mode: str = "mean",
 ) -> dict[str, np.ndarray]:
     """Return R, G, NIR planes from a Bayer mosaic at half resolution.
 

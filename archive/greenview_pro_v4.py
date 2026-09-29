@@ -4,6 +4,7 @@
 import copy
 import sys
 import time
+import tomllib
 from threading import Lock
 from datetime import datetime
 from pathlib import Path
@@ -27,9 +28,8 @@ ICON_DIR = BASE_DIR / "icons"
 SNAPSHOT_DIR = BASE_DIR / "snapshots"
 COLOR_IMAGE_FILE = BASE_DIR / "color_image.jpg"
 MARKETING_FILE = BASE_DIR / "marketing_messages_ndvi_v1_1.txt"
+CONFIG_FILE = BASE_DIR / "config.toml"
 GUI_INTERVAL_MS = 66
-LOW_DEFAULT = 5
-HIGH_DEFAULT = 99
 RECONNECT_SECONDS = 2.0
 
 CCM = np.array([
@@ -41,6 +41,22 @@ CCM = np.array([
 _cmap = matplotlib.colormaps.get_cmap("RdYlGn").resampled(256)
 _colors = (_cmap(np.linspace(0, 1, 256))[:, :3] * 255).astype(np.uint8)
 COLORMAP = np.ascontiguousarray(_colors.reshape(256, 1, 3)[..., ::-1])
+
+def load_settings():
+    with CONFIG_FILE.open("rb") as file:
+        settings = tomllib.load(file)
+    for key in ("exposure_time", "ndvi_percentile_lower", "ndvi_percentile_upper",
+                "cvi_percentile_lower", "cvi_percentile_upper"):
+        if type(settings.get(key)) is not int:
+            raise ValueError(f"{CONFIG_FILE}: {key} must be an integer")
+    if settings["exposure_time"] <= 0:
+        raise ValueError(f"{CONFIG_FILE}: exposure_time must be positive")
+    for index in ("ndvi", "cvi"):
+        low = settings[f"{index}_percentile_lower"]
+        high = settings[f"{index}_percentile_upper"]
+        if not 0 <= low < high <= 100:
+            raise ValueError(f"{CONFIG_FILE}: {index} percentiles must satisfy 0 <= lower < upper <= 100")
+    return settings
 
 
 def load_icon(name):
@@ -88,14 +104,16 @@ class CameraWorker(QThread):
     recoverable_error = Signal(str)
     white_balance_changed = Signal(str)
 
-    def __init__(self):
+    def __init__(self, settings):
         super().__init__()
         self._shutdown = False
         self._wanted = True
-        self._low = LOW_DEFAULT
-        self._high = HIGH_DEFAULT
+        self._ndvi_low = settings["ndvi_percentile_lower"]
+        self._ndvi_high = settings["ndvi_percentile_upper"]
+        self._cvi_low = settings["cvi_percentile_lower"]
+        self._cvi_high = settings["cvi_percentile_upper"]
         # Session settings survive disconnect/reconnect and manual close/start.
-        self._saved_exposure = None
+        self._saved_exposure = settings["exposure_time"]
         self._pending_exposure = None
         # Host-side auto white balance. This is independent of the camera node
         # BalanceWhiteAuto and therefore also works when that node is unavailable.
@@ -122,11 +140,18 @@ class CameraWorker(QThread):
         self._close_camera()
         self.state_changed.emit("Camera stopped", False)
 
-    @Slot(int, int)
-    def set_percentiles(self, low, high):
-        if 0 <= low < high <= 100:
-            self._low, self._high = low, high
-            self._ndvi_bounds = None; self._cvi_bounds = None
+    @Slot(str, int, int)
+    def set_percentiles(self, index, low, high):
+        if not 0 <= low < high <= 100:
+            raise ValueError("Percentiles must satisfy 0 <= lower < upper <= 100")
+        if index == "NDVI":
+            self._ndvi_low, self._ndvi_high = low, high
+            self._ndvi_bounds = None
+        elif index == "CVI":
+            self._cvi_low, self._cvi_high = low, high
+            self._cvi_bounds = None
+        else:
+            raise ValueError(f"Unknown index: {index}")
 
     @Slot(int)
     def set_exposure(self, value):
@@ -271,18 +296,31 @@ class CameraWorker(QThread):
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
             ndvi_raw=(nir-red)/(nir+red+np.float32(0.01)); cvi_raw=(nir*red)/(green*green+np.float32(0.01))
         self._normalization_frame += 1
-        if self._ndvi_bounds is None or self._normalization_frame % self._bounds_update_interval == 0:
-            ndvi_new=full_percentile_bounds(ndvi_raw,self._low,self._high);cvi_new=full_percentile_bounds(cvi_raw,self._low,self._high)
-            if self._ndvi_bounds is None:self._ndvi_bounds,self._cvi_bounds=ndvi_new,cvi_new
+        periodic = self._normalization_frame % self._bounds_update_interval == 0
+        if self._ndvi_bounds is None or periodic:
+            ndvi_new = full_percentile_bounds(ndvi_raw, self._ndvi_low, self._ndvi_high)
+            if self._ndvi_bounds is None:
+                self._ndvi_bounds = ndvi_new
             else:
-                a=self._bounds_smoothing;self._ndvi_bounds=tuple((1-a)*o+a*n for o,n in zip(self._ndvi_bounds,ndvi_new));self._cvi_bounds=tuple((1-a)*o+a*n for o,n in zip(self._cvi_bounds,cvi_new))
-        ndvi=heatmap(normalize_with_bounds(ndvi_raw,*self._ndvi_bounds));cvi=heatmap(normalize_with_bounds(cvi_raw,*self._cvi_bounds))
-        maximum=float(np.iinfo(raw.dtype).max) if np.issubdtype(raw.dtype,np.integer) else max(float(np.max(raw)),1)
-        raw8=raw if raw.dtype==np.uint8 else np.clip(raw.astype(np.float32)*(255/maximum),0,255).astype(np.uint8)
+                a = self._bounds_smoothing
+                self._ndvi_bounds = tuple((1-a)*o+a*n for o,n in zip(self._ndvi_bounds,ndvi_new))
+        if self._cvi_bounds is None or periodic:
+            cvi_new = full_percentile_bounds(cvi_raw, self._cvi_low, self._cvi_high)
+            if self._cvi_bounds is None:
+                self._cvi_bounds = cvi_new
+            else:
+                a = self._bounds_smoothing
+                self._cvi_bounds = tuple((1-a)*o+a*n for o,n in zip(self._cvi_bounds,cvi_new))
+        ndvi = heatmap(normalize_with_bounds(ndvi_raw,*self._ndvi_bounds))
+        cvi = heatmap(normalize_with_bounds(cvi_raw,*self._cvi_bounds))
+        maximum = float(np.iinfo(raw.dtype).max) if np.issubdtype(raw.dtype,np.integer) else max(float(np.max(raw)),1)
+        raw8 = raw if raw.dtype==np.uint8 else np.clip(raw.astype(np.float32)*(255/maximum),0,255).astype(np.uint8)
         raw_bgr=cv2.cvtColor(raw8,cv2.COLOR_GRAY2BGR)
         return raw_bgr, ndvi, cvi
+
     def latest(self):
         with self._latest_lock:return self._latest,self._latest_version
+
     def run(self):
         last_attempt = 0.0
         last_frame = time.perf_counter()
@@ -401,7 +439,7 @@ class MainWindow(QMainWindow):
     start_requested = Signal()
     close_requested = Signal()
     exposure_requested = Signal(int)
-    percentiles_requested = Signal(int, int)
+    percentiles_requested = Signal(str, int, int)
     white_balance_requested = Signal(str)
 
     def __init__(self):
@@ -413,12 +451,14 @@ class MainWindow(QMainWindow):
         self._last_images = None
         self._last_gui_version = -1
         self._marketing_index = 0
+        self._display_index = 0
         self._animation = None
+        self.settings = load_settings()
         self.marketing_settings, self.marketing_messages = self.load_marketing()
         self.color_image = cv2.imread(str(COLOR_IMAGE_FILE))
         self._build()
         self._style()
-        self.worker = CameraWorker()
+        self.worker = CameraWorker(self.settings)
         self.worker.state_changed.connect(self.update_state)
         self.worker.exposure_range.connect(self.configure_exposure)
         self.start_requested.connect(self.worker.start_camera)
@@ -444,8 +484,9 @@ class MainWindow(QMainWindow):
         self._build_main()
         self._build_demo()
 
-    def _make_cards(self):
-        cards = [ImageCard("REFERENCE IMAGE",smooth=True), ImageCard("RAW",smooth=False), ImageCard("NDVI",smooth=True), ImageCard("CVI",smooth=True)]
+    def _make_cards(self, demo=False):
+        cards = [ImageCard("REFERENCE IMAGE",smooth=True), ImageCard("RAW",smooth=False)]
+        cards += [ImageCard("CVI")] if demo else [ImageCard("NDVI"), ImageCard("CVI")]
         if self.color_image is not None:
             cards[0].set_image(self.color_image)
         else:
@@ -465,10 +506,10 @@ class MainWindow(QMainWindow):
 
     def _build_main(self):
         root = QVBoxLayout(self.main_page)
-        root.setContentsMargins(18, 14, 18, 8)
-        root.setSpacing(8)
+        root.setContentsMargins(6, 5, 6, 5)
+        root.setSpacing(4)
         header = QHBoxLayout()
-        logo = QLabel(); logo.setFixedSize(170, 52)
+        logo = QLabel(); logo.setFixedSize(145, 42)
         logo_path = ICON_DIR / "ids-logo_black_rgb.png"
         if logo_path.exists(): logo.setPixmap(QPixmap(str(logo_path)).scaled(logo.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else: logo.setText("IDS")
@@ -485,10 +526,17 @@ class MainWindow(QMainWindow):
         self.exposure.valueChanged.connect(self.change_exposure)
         self.exposure_label = QLabel("- us")
         bar.addWidget(self.exposure, 1); bar.addWidget(self.exposure_label)
-        bar.addWidget(QLabel("Contrast"))
-        self.low = PercentControl(LOW_DEFAULT, 0, 98); self.high = PercentControl(HIGH_DEFAULT, 1, 100)
-        self.low.changed.connect(self.change_percentiles); self.high.changed.connect(self.change_percentiles)
-        bar.addWidget(self.low); bar.addWidget(QLabel("to")); bar.addWidget(self.high)
+        for index in ("ndvi", "cvi"):
+            low = PercentControl(self.settings[f"{index}_percentile_lower"], 0,
+                                 self.settings[f"{index}_percentile_upper"] - 1)
+            high = PercentControl(self.settings[f"{index}_percentile_upper"],
+                                  self.settings[f"{index}_percentile_lower"] + 1, 100)
+            setattr(self, f"{index}_low", low)
+            setattr(self, f"{index}_high", high)
+            low.changed.connect(lambda _, name=index.upper(): self.change_percentiles(name))
+            high.changed.connect(lambda _, name=index.upper(): self.change_percentiles(name))
+            bar.addWidget(QLabel(index.upper()))
+            bar.addWidget(low); bar.addWidget(QLabel("to")); bar.addWidget(high)
         self.snapshot_button = QPushButton("Save snapshot"); self.snapshot_button.clicked.connect(self.save_snapshot)
         bar.addWidget(self.snapshot_button)
         root.addWidget(controls)
@@ -498,17 +546,17 @@ class MainWindow(QMainWindow):
         self.demo_header=QWidget();header=QGridLayout(self.demo_header);header.setContentsMargins(28,8,28,8);header.setHorizontalSpacing(20)
         self.demo_logo=QLabel();self.demo_logo.setAlignment(Qt.AlignLeft|Qt.AlignVCenter);logo_path=ICON_DIR/"ids-logo_black_rgb.png";self.demo_logo_source=QPixmap(str(logo_path)) if logo_path.exists() else QPixmap();header.addWidget(self.demo_logo,0,0,Qt.AlignLeft|Qt.AlignVCenter)
         self.message_box=QWidget();message=QVBoxLayout(self.message_box);message.setContentsMargins(0,0,0,0);message.setSpacing(3);self.demo_title=QLabel();self.demo_title.setObjectName("demoTitle");self.demo_title.setAlignment(Qt.AlignCenter);self.demo_title.setWordWrap(True);self.demo_subtitle=QLabel();self.demo_subtitle.setObjectName("demoSubtitle");self.demo_subtitle.setAlignment(Qt.AlignCenter);self.demo_subtitle.setWordWrap(True);message.addStretch();message.addWidget(self.demo_title);message.addWidget(self.demo_subtitle);message.addStretch();self.message_effect=QGraphicsOpacityEffect(self.message_box);self.message_box.setGraphicsEffect(self.message_effect);header.addWidget(self.message_box,0,1,Qt.AlignVCenter);self.demo_header_balance=QWidget();header.addWidget(self.demo_header_balance,0,2);header.setColumnStretch(1,1);root.addWidget(self.demo_header)
-        self.demo_middle=QWidget();middle=QHBoxLayout(self.demo_middle);middle.setContentsMargins(0,0,0,0);middle.setSpacing(8);self.demo_large=ImageCard("NDVI",smooth=True);middle.addWidget(self.demo_large);self.demo_reference=QWidget();refs=QGridLayout(self.demo_reference);refs.setContentsMargins(0,0,0,0);refs.setSpacing(6);self.demo_cards=self._make_cards()
-        for card,(r,c) in zip(self.demo_cards,((0,0),(0,1),(1,0),(1,1))):refs.addWidget(card,r,c)
-        refs.setRowStretch(0,1);refs.setRowStretch(1,1);refs.setColumnStretch(0,1);refs.setColumnStretch(1,1);middle.addWidget(self.demo_reference);root.addWidget(self.demo_middle,0,Qt.AlignHCenter|Qt.AlignVCenter)
+        self.demo_middle=QWidget();middle=QHBoxLayout(self.demo_middle);middle.setContentsMargins(0,0,0,0);middle.setSpacing(8);self.demo_large=ImageCard("NDVI",smooth=True);middle.addWidget(self.demo_large);self.demo_reference=QWidget();refs=QVBoxLayout(self.demo_reference);refs.setContentsMargins(0,0,0,0);refs.setSpacing(6);self.demo_cards=self._make_cards(demo=True)
+        for card in self.demo_cards:refs.addWidget(card,1)
+        middle.addWidget(self.demo_reference);root.addWidget(self.demo_middle,0,Qt.AlignHCenter|Qt.AlignVCenter)
         self.demo_footer=QWidget();bottom=QVBoxLayout(self.demo_footer);bottom.setContentsMargins(24,8,24,12);self.facts=QWidget();facts=QHBoxLayout(self.facts);facts.setContentsMargins(0,0,0,0);facts.setSpacing(28);self.fact_blocks=[]
         for _ in range(3):block=QWidget();bl=QVBoxLayout(block);bl.setContentsMargins(0,0,0,0);bl.setSpacing(2);h=QLabel();h.setObjectName("demoFact");h.setAlignment(Qt.AlignCenter);h.setWordWrap(True);d=QLabel();d.setObjectName("demoFactDetail");d.setAlignment(Qt.AlignCenter);d.setWordWrap(True);bl.addWidget(h);bl.addWidget(d);facts.addWidget(block,1);self.fact_blocks.append((h,d))
         self.facts_effect=QGraphicsOpacityEffect(self.facts);self.facts.setGraphicsEffect(self.facts_effect);bottom.addWidget(self.facts);root.addWidget(self.demo_footer);self.apply_message();QTimer.singleShot(0,self._size_demo_layout)
 
     def _size_demo_layout(self):
         screen=self.screen() or QApplication.primaryScreen();size=screen.size() if screen else self.size();sw=max(1,size.width());sh=max(1,size.height());scale=max(0.75,min(sw/1920.0,sh/1080.0))
-        header_h=round(160*scale);footer_h=round(160*scale);reserve=round(40*scale);available=max(1,sh-reserve-header_h-footer_h);raster_h=min(round(720*scale),available,round(sw*3/8));raster_w=round(raster_h*8/3);large_w=round(raster_h*4/3)
-        self.demo_header.setFixedHeight(header_h);self.demo_footer.setFixedHeight(footer_h);self.demo_middle.setFixedSize(raster_w,raster_h);self.demo_large.setFixedSize(large_w,raster_h);self.demo_reference.setFixedSize(large_w,raster_h)
+        header_h=round(125*scale);footer_h=round(120*scale);reserve=round(16*scale);available=max(1,sh-reserve-header_h-footer_h);raster_h=min(available,round(sw*27/64));raster_w=round(raster_h*64/27);large_w=round(raster_h*16/9)
+        self.demo_header.setFixedHeight(header_h);self.demo_footer.setFixedHeight(footer_h);self.demo_middle.setFixedSize(raster_w,raster_h);self.demo_large.setFixedSize(large_w,raster_h);self.demo_reference.setFixedSize(raster_w-large_w-self.demo_middle.layout().spacing(),raster_h)
         logo_w,logo_h=round(285*scale),round(93*scale);self.demo_logo.setFixedSize(logo_w,logo_h);self.demo_header_balance.setFixedWidth(logo_w)
         if not self.demo_logo_source.isNull():self.demo_logo.setPixmap(self.demo_logo_source.scaled(self.demo_logo.size(),Qt.KeepAspectRatio,Qt.SmoothTransformation))
         self.demo_title.setStyleSheet(f"font-size:{round(52*scale)}px;font-weight:700;");self.demo_subtitle.setStyleSheet(f"font-size:{round(25*scale)}px;font-weight:600;")
@@ -555,15 +603,15 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def message_from(data):
-        return {"title":data["TITLE"], "subtitle":data["SUBTITLE"], "large_view":data.get("LARGE_VIEW","").strip().upper(), "facts":[(data[f"FACT{i}_TITLE"],data[f"FACT{i}_DETAIL"]) for i in range(1,4)]}
+        return {"title":data["TITLE"], "subtitle":data["SUBTITLE"], "facts":[(data[f"FACT{i}_TITLE"],data[f"FACT{i}_DETAIL"]) for i in range(1,4)]}
 
     def pull_latest(self):
         result, version = self.worker.latest()
         if result is None or version == self._last_gui_version: return
         self._last_gui_version = version; self._last_images = result
         if self.demo_mode:
-            for card,image in zip(self.demo_cards[1:],result):card.set_image(image)
-            name=self._large_view_name();self.demo_large.overlay.setText(name);self.demo_large.set_image(result[1] if name=="NDVI" else result[2])
+            self.demo_cards[1].set_image(result[0])
+            self._update_demo_indices()
         else:
             for card,image in zip(self.main_cards[1:],result):card.set_image(image)
 
@@ -572,26 +620,42 @@ class MainWindow(QMainWindow):
         self.exposure.setRange(minimum, maximum); self.exposure.setValue(current); self.exposure.setEnabled(True); self.exposure_label.setText(f"{current} us")
 
     def change_exposure(self, value): self.exposure_label.setText(f"{value} us"); self.exposure_requested.emit(value)
-    def change_percentiles(self, _):
-        low, high = self.low.value(), self.high.value(); self.low.set_limits(0, high-1); self.high.set_limits(low+1, 100); self.percentiles_requested.emit(low, high)
+    def change_percentiles(self, index):
+        low_control = getattr(self, f"{index.lower()}_low")
+        high_control = getattr(self, f"{index.lower()}_high")
+        low, high = low_control.value(), high_control.value()
+        low_control.set_limits(0, high-1)
+        high_control.set_limits(low+1, 100)
+        self.percentiles_requested.emit(index, low, high)
     @Slot(str, bool)
     def update_state(self, text, connected): pass
 
     def enter_demo(self):
         self.demo_mode = True; self._normal_geometry = self.normalGeometry(); self.stack.setCurrentWidget(self.demo_page); self.showFullScreen(); self.marketing_timer.start(); QTimer.singleShot(0,self._size_demo_layout); QTimer.singleShot(120,self.refresh_visible)
+        if self._last_images is not None:
+            self.demo_cards[1].set_image(self._last_images[0])
+            self._update_demo_indices()
     def exit_demo(self):
         self.demo_mode = False; self.marketing_timer.stop(); self.stack.setCurrentWidget(self.main_page); self.showNormal()
         if self._normal_geometry and self._normal_geometry.isValid(): self.setGeometry(self._normal_geometry)
         QTimer.singleShot(100, self.refresh_visible)
 
     def _large_view_name(self):
-        requested=self.marketing_messages[self._marketing_index].get("large_view","")
-        return requested if requested in ("NDVI","CVI") else ("NDVI" if self._marketing_index%2==0 else "CVI")
+        return "NDVI" if self._display_index % 2 == 0 else "CVI"
+
+    def _update_demo_indices(self):
+        name = self._large_view_name()
+        other = "CVI" if name == "NDVI" else "NDVI"
+        self.demo_large.overlay.setText(name)
+        self.demo_cards[2].overlay.setText(other)
+        if self._last_images is not None:
+            self.demo_large.set_image(self._last_images[1] if name == "NDVI" else self._last_images[2])
+            self.demo_cards[2].set_image(self._last_images[2] if name == "NDVI" else self._last_images[1])
+
     def apply_message(self):
         message=self.marketing_messages[self._marketing_index];self.demo_title.setText(message["title"]);self.demo_subtitle.setText(message["subtitle"])
         for i,(h,d) in enumerate(self.fact_blocks):h.setText(message["facts"][i][0]);d.setText(message["facts"][i][1])
-        name=self._large_view_name();self.demo_large.overlay.setText(name)
-        if self._last_images is not None:self.demo_large.set_image(self._last_images[1] if name=="NDVI" else self._last_images[2])
+        self._update_demo_indices()
 
     def make_animation(self, effect, start, end, seconds):
         animation = QPropertyAnimation(effect, b"opacity", self); animation.setStartValue(start); animation.setEndValue(end); animation.setDuration(int(seconds*1000)); animation.setEasingCurve(QEasingCurve.InOutCubic); return animation
@@ -601,7 +665,7 @@ class MainWindow(QMainWindow):
         fade = float(self.marketing_settings.get("FADE_OUT_TIME", 1)); group = QParallelAnimationGroup(self)
         for effect in (self.message_effect, self.facts_effect): group.addAnimation(self.make_animation(effect, 1, 0, fade))
         def swap():
-            self._marketing_index = (self._marketing_index+1) % len(self.marketing_messages); self.apply_message(); inside = QParallelAnimationGroup(self)
+            self._marketing_index = (self._marketing_index+1) % len(self.marketing_messages); self._display_index += 1; self.apply_message(); inside = QParallelAnimationGroup(self)
             for effect in (self.message_effect, self.facts_effect): inside.addAnimation(self.make_animation(effect, 0, 1, float(self.marketing_settings.get("FADE_IN_TIME",1))))
             inside.finished.connect(lambda: setattr(self, "_animation", None)); self._animation = inside; inside.start()
         group.finished.connect(swap); self._animation = group; group.start()

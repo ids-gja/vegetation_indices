@@ -2,7 +2,9 @@
 
 import argparse
 from datetime import datetime
+import math
 from pathlib import Path
+import re
 import sys
 import time
 import tomllib
@@ -13,6 +15,7 @@ from PySide6.QtCore import (
     QEasingCurve,
     QParallelAnimationGroup,
     QPropertyAnimation,
+    QSaveFile,
     QSignalBlocker,
     QSize,
     Qt,
@@ -23,20 +26,25 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QDialog,
     QFrame,
     QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QSizePolicy,
     QSlider,
     QStackedWidget,
+    QSpinBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from greenview_pro.contrast_control import ContrastRange
 from greenview_pro.processing import HIGH_DEFAULT, LOW_DEFAULT, CameraWorker
 
 APP_NAME = "IDS GreenView Pro"
@@ -49,7 +57,11 @@ MESSAGE_DIR = DATA_DIR / "messages"
 SNAPSHOT_DIR = Path.cwd() / "snapshots"
 GUI_INTERVAL_MS = 66
 MESSAGE_PROGRESS_INTERVAL_MS = 16
-VIEW_NAMES = ("REFERENCE IMAGE", "RAW", "NDVI", "CVI")
+ROTATING_VIEWS = ("NDVI", "CVI")
+VIEW_NAMES = ("REFERENCE IMAGE", "RAW", *ROTATING_VIEWS)
+RAW_GAMMA_LUT = np.rint(
+    255 * (np.arange(256, dtype=np.float32) / 255) ** (1 / 2.2)
+).astype(np.uint8)
 
 
 def load_icon(name: str) -> QIcon:
@@ -57,10 +69,36 @@ def load_icon(name: str) -> QIcon:
     return QIcon(str(path)) if path.exists() else QIcon()
 
 
+def update_settings_text(document, updates):
+    header = re.search(r"(?m)^\[settings\][ \t]*(?:#[^\r\n]*)?$", document)
+    if header is None:
+        if document and not document.endswith("\n"):
+            document += "\n"
+        document += "[settings]\n"
+        header = re.search(r"(?m)^\[settings\]$", document)
+    following = re.search(r"(?m)^\[", document[header.end():])
+    end = header.end() + following.start() if following else len(document)
+    section = document[header.end():end]
+    for name, value in updates.items():
+        encoded = (
+            "true" if value is True else "false" if value is False else str(value)
+        )
+        pattern = rf"(?m)^([ \t]*){re.escape(name)}[ \t]*=[^\r\n]*"
+        section, count = re.subn(
+            pattern, lambda match: f"{match.group(1)}{name} = {encoded}",
+            section, count=1,
+        )
+        if not count:
+            if section and not section.endswith("\n"):
+                section += "\n"
+            section += f"{name} = {encoded}\n"
+    return document[:header.end()] + section + document[end:]
+
+
 class ImageCard(QFrame):
     IMAGE_MARGIN = 12
 
-    def __init__(self, title, subtitle="", smooth=True):
+    def __init__(self, title, subtitle="", smooth=True, raw_gamma=False):
         super().__init__()
         self.setObjectName("imageCard")
         layout = QVBoxLayout(self)
@@ -76,10 +114,15 @@ class ImageCard(QFrame):
         self.overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._array = None
         self._smooth = smooth
+        self._raw_gamma = raw_gamma
         self.aspect_ratio = 1.0
 
-    def set_image(self, array):
-        self._array = array
+    def set_image(self, array, *, raw_gamma=None, smooth=None):
+        if raw_gamma is not None:
+            self._raw_gamma = raw_gamma
+        if smooth is not None:
+            self._smooth = smooth
+        self._array = cv2.LUT(array, RAW_GAMMA_LUT) if self._raw_gamma else array
         self._refresh()
 
     def clear_image(self):
@@ -131,65 +174,6 @@ class ImageCard(QFrame):
         self._refresh()
 
 
-class PercentControl(QFrame):
-    changed = Signal(int)
-
-    def __init__(self, value, minimum, maximum):
-        super().__init__()
-        self.setObjectName("percent")
-        self._value, self._minimum, self._maximum = value, minimum, maximum
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(7, 2, 2, 2)
-        layout.setSpacing(2)
-        self.label = QLabel()
-        self.label.setMinimumWidth(42)
-        self.label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        arrows = QVBoxLayout()
-        arrows.setSpacing(0)
-        arrows.setContentsMargins(0, 0, 0, 0)
-        self.up = QToolButton()
-        self.down = QToolButton()
-        for button in (self.up, self.down):
-            button.setObjectName("arrow")
-            button.setFixedSize(20, 15)
-        self.up.setIcon(load_icon("arrow_up.svg"))
-        self.down.setIcon(load_icon("arrow_down.svg"))
-        self.up.setIconSize(QSize(14, 9))
-        self.down.setIconSize(QSize(14, 9))
-        self.up.clicked.connect(self.increase)
-        self.down.clicked.connect(self.decrease)
-        arrows.addWidget(self.up)
-        arrows.addWidget(self.down)
-        layout.addWidget(self.label)
-        layout.addLayout(arrows)
-        self._refresh()
-
-    def value(self):
-        return self._value
-
-    def set_limits(self, minimum, maximum):
-        self._minimum, self._maximum = minimum, maximum
-        self._value = max(minimum, min(self._value, maximum))
-        self._refresh()
-
-    def increase(self):
-        if self._value < self._maximum:
-            self._value += 1
-            self._refresh()
-            self.changed.emit(self._value)
-
-    def decrease(self):
-        if self._value > self._minimum:
-            self._value -= 1
-            self._refresh()
-            self.changed.emit(self._value)
-
-    def _refresh(self):
-        self.label.setText(f"{self._value} %")
-        self.up.setEnabled(self._value < self._maximum)
-        self.down.setEnabled(self._value > self._minimum)
-
-
 class InfoRow(QWidget):
     def __init__(self, name, value="-"):
         super().__init__()
@@ -214,7 +198,7 @@ class MessageProgressIndicator(QWidget):
         super().__init__()
         self._color = QColor(color)
         self._progress = 0.0
-        self.setFixedSize(20, 20)
+        self.setFixedSize(40, 40)
 
     def set_progress(self, progress):
         self._progress = max(0.0, min(float(progress), 1.0))
@@ -235,35 +219,14 @@ class MessageProgressIndicator(QWidget):
         )
 
 
-class ViewProgressIndicator(QWidget):
-    """Subpixel-accurate elapsed-time bar for the image slideshow."""
-
-    def __init__(self, color, parent=None):
-        super().__init__(parent)
-        self._color = QColor(color)
-        self._progress = 0.0
-        self.setFixedHeight(6)
-
-    def set_progress(self, progress):
-        self._progress = max(0.0, min(float(progress), 1.0))
-        self.update()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#D9E2E3"))
-        painter.fillRect(
-            0.0, 0.0, self.width() * self._progress, float(self.height()), self._color
-        )
-
-
 class MainWindow(QMainWindow):
     worker_class = CameraWorker
     start_requested = Signal()
     close_requested = Signal()
     exposure_requested = Signal(int)
-    percentiles_requested = Signal(int, int)
-    preview_size_requested = Signal(int, int)
+    percentiles_requested = Signal(str, int, int)
+    temporal_requested = Signal(bool, float)
+    preview_size_requested = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -280,9 +243,10 @@ class MainWindow(QMainWindow):
         self._last_preview_size = None
         self._source_aspect_ratio = None
         self.marketing_settings, self.marketing_messages = self.load_marketing()
+        self.temporal_enabled = self.marketing_settings["TEMPORAL_ENABLED"]
+        self.temporal_weight = float(self.marketing_settings["TEMPORAL_WEIGHT"])
         self._view_spacing = max(0, int(self.marketing_settings.get("VIEW_SPACING", 1)))
         self._message_cycle_started = None
-        self._view_cycle_started = None
         self._demo_aspect_ratio = None
         self.color_image = cv2.imread(str(COLOR_IMAGE_FILE))
         self._build()
@@ -295,8 +259,16 @@ class MainWindow(QMainWindow):
         self.close_requested.connect(self.worker.close_camera)
         self.exposure_requested.connect(self.worker.set_exposure)
         self.percentiles_requested.connect(self.worker.set_percentiles)
-        self.preview_size_requested.connect(self.worker.set_preview_size)
+        self.temporal_requested.connect(self.worker.set_temporal_filter)
+        self.preview_size_requested.connect(self.worker.set_preview_sizes)
         self.worker.recoverable_error.connect(self.show_camera_error)
+        self.worker.set_temporal_filter(self.temporal_enabled, self.temporal_weight)
+        for index in ("ndvi", "cvi"):
+            self.worker.set_percentiles(
+                index, *getattr(self, f"{index}_contrast").values()
+            )
+        if "EXPOSURE_US" in self.marketing_settings:
+            self.worker.set_exposure(self.marketing_settings["EXPOSURE_US"])
         self.worker.start()
         self.gui_timer = QTimer(self)
         self.gui_timer.setInterval(GUI_INTERVAL_MS)
@@ -306,17 +278,12 @@ class MainWindow(QMainWindow):
         self.marketing_timer.setInterval(
             int(float(self.marketing_settings.get("DISPLAY_TIME", 12)) * 1000)
         )
+        self.marketing_timer.setSingleShot(True)
         self.marketing_timer.timeout.connect(self.next_message)
         self.message_progress_timer = QTimer(self)
         self.message_progress_timer.setInterval(MESSAGE_PROGRESS_INTERVAL_MS)
         self.message_progress_timer.setTimerType(Qt.PreciseTimer)
         self.message_progress_timer.timeout.connect(self._update_message_progress)
-        self.message_progress_timer.timeout.connect(self._update_view_progress)
-        self.view_timer = QTimer(self)
-        self.view_timer.setInterval(
-            int(float(self.marketing_settings.get("VIEW_ROTATION_SECONDS", 5)) * 1000)
-        )
-        self.view_timer.timeout.connect(self.next_view)
 
     def _build(self):
         self.stack = QStackedWidget()
@@ -330,7 +297,7 @@ class MainWindow(QMainWindow):
     def _make_cards(self):
         cards = [
             ImageCard("REFERENCE IMAGE", smooth=True),
-            ImageCard("RAW", smooth=False),
+            ImageCard("RAW", smooth=False, raw_gamma=True),
             ImageCard("NDVI", smooth=True),
             ImageCard("CVI", smooth=True),
         ]
@@ -357,7 +324,10 @@ class MainWindow(QMainWindow):
         controls = QFrame()
         self.controls = controls
         controls.setObjectName("controls")
-        bar = QHBoxLayout(controls)
+        panel = QVBoxLayout(controls)
+        panel.setSpacing(2)
+        bar = QHBoxLayout()
+        panel.addLayout(bar)
         logo = QLabel()
         logo.setFixedSize(140, 44)
         logo_path = ICON_DIR / "ids-logo_black_rgb.png"
@@ -376,29 +346,69 @@ class MainWindow(QMainWindow):
         bar.addSpacing(16)
         bar.addWidget(QLabel("Exposure"))
         self.exposure = QSlider(Qt.Horizontal)
+        self.exposure.setMinimumWidth(130)
         self.exposure.setEnabled(False)
         self.exposure.valueChanged.connect(self.change_exposure)
         self.exposure_label = QLabel("- us")
+        self.exposure_label.setFixedWidth(80)
+        self.exposure_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         bar.addWidget(self.exposure, 1)
         bar.addWidget(self.exposure_label)
-        bar.addWidget(QLabel("Contrast"))
-        self.low = PercentControl(LOW_DEFAULT, 0, 98)
-        self.high = PercentControl(HIGH_DEFAULT, 1, 100)
-        self.low.changed.connect(self.change_percentiles)
-        self.high.changed.connect(self.change_percentiles)
-        bar.addWidget(self.low)
-        bar.addWidget(QLabel("to"))
-        bar.addWidget(self.high)
+        bar.addSpacing(16)
+        contrast_rows = QVBoxLayout()
+        contrast_rows.setContentsMargins(0, 0, 0, 0)
+        contrast_rows.setSpacing(0)
+        for name in ("NDVI", "CVI"):
+            row = QHBoxLayout()
+            title = QLabel(name)
+            title.setFixedWidth(44)
+            row.addWidget(title)
+            low = self.marketing_settings[f"{name}_LOW_PERCENTILE"]
+            high = self.marketing_settings[f"{name}_HIGH_PERCENTILE"]
+            control = ContrastRange(low, high)
+            control.setAccessibleName(f"{name} contrast percentile range")
+            control.changed.connect(
+                lambda low, high, index=name.lower(): self.change_percentiles(
+                    index, low, high
+                )
+            )
+            row.addWidget(control, 1)
+            label = QLabel(f"{low}-{high} %")
+            label.setFixedWidth(78)
+            label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            row.addWidget(label)
+            setattr(self, f"{name.lower()}_contrast", control)
+            setattr(self, f"{name.lower()}_contrast_label", label)
+            contrast_rows.addLayout(row)
+        bar.addLayout(contrast_rows, 2)
+        self.save_config_button = QToolButton()
+        self.save_config_button.setIcon(load_icon("save.svg"))
+        self.save_config_button.setIconSize(QSize(22, 22))
+        self.save_config_button.setFixedSize(36, 36)
+        self.save_config_button.setToolTip("Save current configuration")
+        self.save_config_button.setAccessibleName("Save config")
+        self.save_config_button.clicked.connect(self.save_config)
+        bar.addWidget(self.save_config_button)
         self.snapshot_button = QToolButton()
         self.snapshot_button.setIcon(load_icon("save.svg"))
         self.snapshot_button.setIconSize(QSize(22, 22))
         self.snapshot_button.setFixedSize(36, 36)
+        self.snapshot_button.setStyleSheet(
+            "QToolButton { border: 1px solid #008A96; "
+            "border-radius: 4px; background: white; }"
+        )
         self.snapshot_button.setToolTip("Save snapshot")
         self.snapshot_button.setAccessibleName("Save snapshot")
         self.snapshot_button.clicked.connect(self.save_snapshot)
         bar.addWidget(self.snapshot_button)
-        self.camera_status = QLabel("Connecting camera...")
-        bar.addWidget(self.camera_status)
+        self.settings_button = QToolButton()
+        self.settings_button.setIcon(load_icon("gear.svg"))
+        self.settings_button.setIconSize(QSize(22, 22))
+        self.settings_button.setFixedSize(36, 36)
+        self.settings_button.setToolTip("Settings")
+        self.settings_button.setAccessibleName("Settings")
+        self.settings_button.clicked.connect(self.open_settings)
+        bar.addWidget(self.settings_button)
         self.demo_button = QToolButton()
         self.demo_button.setIcon(load_icon("fullscreen.svg"))
         self.demo_button.setIconSize(QSize(22, 22))
@@ -407,6 +417,12 @@ class MainWindow(QMainWindow):
         self.demo_button.setAccessibleName("Demo Preview (fullscreen)")
         self.demo_button.clicked.connect(self.enter_demo)
         bar.addWidget(self.demo_button)
+        self.status_layout = QVBoxLayout()
+        self.status_layout.setContentsMargins(0, 0, 0, 0)
+        self.camera_status = QLabel("Connecting camera...")
+        self.camera_status.setWordWrap(True)
+        self.status_layout.addWidget(self.camera_status)
+        panel.addLayout(self.status_layout)
         root.addWidget(controls)
         self.main_cards = self._make_cards()
         self._add_grid(
@@ -455,10 +471,6 @@ class MainWindow(QMainWindow):
             QPixmap(str(logo_path)) if logo_path.exists() else QPixmap()
         )
         header.addWidget(self.demo_logo, 0, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        message_container = QWidget()
-        message_container_layout = QHBoxLayout(message_container)
-        message_container_layout.setContentsMargins(0, 0, 0, 0)
-        message_container_layout.setSpacing(self._view_spacing)
         self.message_box = QWidget()
         message = QVBoxLayout(self.message_box)
         message.setContentsMargins(0, 0, 0, 0)
@@ -480,12 +492,16 @@ class MainWindow(QMainWindow):
         self.message_progress = MessageProgressIndicator(
             self.marketing_settings.get("ACCENT_COLOR", "#008A96")
         )
-        message_container_layout.addWidget(self.message_box, 1)
-        message_container_layout.addWidget(
-            self.message_progress, 0, Qt.AlignRight | Qt.AlignVCenter
+        self.message_progress.setVisible(
+            self.marketing_settings["SHOW_PROGRESS_CIRCLE"]
         )
-        header.addWidget(message_container, 0, 1, Qt.AlignVCenter)
+        header.addWidget(self.message_box, 0, 1, Qt.AlignVCenter)
         self.demo_header_balance = QWidget()
+        balance_layout = QHBoxLayout(self.demo_header_balance)
+        balance_layout.setContentsMargins(0, 0, 0, 0)
+        balance_layout.addWidget(
+            self.message_progress, 0, Qt.AlignRight | Qt.AlignTop
+        )
         header.addWidget(self.demo_header_balance, 0, 2)
         header.setColumnStretch(1, 1)
         root.addWidget(self.demo_header)
@@ -493,23 +509,20 @@ class MainWindow(QMainWindow):
         middle = QHBoxLayout(self.demo_middle)
         middle.setContentsMargins(0, 0, 0, 0)
         middle.setSpacing(self._view_spacing)
-        self.demo_large = ImageCard(VIEW_NAMES[self._display_view_index], smooth=True)
-        middle.addWidget(self.demo_large)
-        self.view_progress = ViewProgressIndicator(
-            self.marketing_settings.get("ACCENT_COLOR", "#008A96"),
-            self.demo_large,
+        self.demo_large = ImageCard(
+            ROTATING_VIEWS[self._display_view_index], smooth=True
         )
-        self.view_progress.setObjectName("viewProgress")
-        self.view_progress.setAccessibleName("Image slideshow progress")
+        middle.addWidget(self.demo_large)
         self.demo_reference = QWidget()
-        refs = QVBoxLayout(self.demo_reference)
+        refs = QGridLayout(self.demo_reference)
         refs.setContentsMargins(0, 0, 0, 0)
         refs.setSpacing(self._view_spacing)
         self.demo_cards = [
-            ImageCard(name, smooth=name != "RAW") for name in VIEW_NAMES[1:]
+            ImageCard(name, smooth=name != "RAW", raw_gamma=name == "RAW")
+            for name in VIEW_NAMES
         ]
-        for card in self.demo_cards:
-            refs.addWidget(card, 1)
+        for index, card in enumerate(self.demo_cards):
+            refs.addWidget(card, index // 2, index % 2)
         middle.addWidget(self.demo_reference)
         root.addWidget(self.demo_middle, 0, Qt.AlignHCenter | Qt.AlignVCenter)
         self.demo_footer = QWidget()
@@ -558,34 +571,30 @@ class MainWindow(QMainWindow):
         gap = max(12, self._view_spacing)
         raster_h = min(
             available,
-            max(1, int((sw - 24 - gap) * 3 / (4 * aspect))),
+            max(1, int((sw - 24 - gap - self._view_spacing) / (2 * aspect))),
         )
         while raster_h > 1:
             large_w = round(raster_h * aspect)
-            sidebar_h = max(1, (raster_h - 2 * self._view_spacing) // 3)
+            sidebar_h = max(1, (raster_h - self._view_spacing + 1) // 2)
             sidebar_w = round(sidebar_h * aspect)
-            if large_w + gap + sidebar_w <= sw - 24:
+            if large_w + gap + 2 * sidebar_w + self._view_spacing <= sw - 24:
                 break
             raster_h -= 1
         large_w = round(raster_h * aspect)
-        sidebar_h = max(1, (raster_h - 2 * self._view_spacing) // 3)
+        sidebar_h = max(1, (raster_h - self._view_spacing + 1) // 2)
+        bottom_h = max(1, raster_h - self._view_spacing - sidebar_h)
         sidebar_w = round(sidebar_h * aspect)
+        grid_width = 2 * sidebar_w + self._view_spacing
         self.demo_header.setFixedHeight(header_h)
         self.demo_footer.setFixedHeight(footer_h)
         self.demo_middle.layout().setSpacing(gap)
-        self.demo_middle.setFixedSize(large_w + gap + sidebar_w, raster_h)
+        self.demo_middle.setFixedSize(large_w + gap + grid_width, raster_h)
         self.demo_large.set_aspect_ratio(aspect)
         self.demo_large.setFixedSize(large_w, raster_h)
-        self.demo_reference.setFixedSize(sidebar_w, raster_h)
-        for card in self.demo_cards:
+        self.demo_reference.setFixedSize(grid_width, raster_h)
+        for index, card in enumerate(self.demo_cards):
             card.set_aspect_ratio(aspect)
-        self.view_progress.setGeometry(
-            0,
-            raster_h - self.view_progress.height(),
-            large_w,
-            self.view_progress.height(),
-        )
-        self.view_progress.raise_()
+            card.setFixedSize(sidebar_w, sidebar_h if index < 2 else bottom_h)
         logo_w, logo_h = 285, 93
         self.demo_logo.setFixedSize(logo_w, logo_h)
         self.demo_header_balance.setFixedWidth(logo_w)
@@ -616,18 +625,63 @@ class MainWindow(QMainWindow):
         return image.shape[1] / image.shape[0] if image is not None else 4 / 3
 
     def _request_preview_size(self):
-        cards = [self.demo_large] if self.demo_mode else self.main_cards[1:]
-        card = max(
-            cards,
-            key=lambda candidate: candidate.image.width() * candidate.image.height(),
-        )
-        size = card.image.size()
-        scale = 1 if self.demo_mode else 2
-        preview_size = (size.width() * scale, size.height() * scale)
-        if min(preview_size) < 2 or preview_size == self._last_preview_size:
+        if self.demo_mode:
+            raw_card = self.demo_cards[1].image.size()
+            large = self.demo_large.image.size()
+            raw = (raw_card.width(), raw_card.height())
+            large_size = (large.width(), large.height())
+            ndvi_card = self.demo_cards[2].image.size()
+            cvi_card = self.demo_cards[3].image.size()
+            ndvi = large_size if self._display_view_index == 0 else (
+                ndvi_card.width(), ndvi_card.height()
+            )
+            cvi = large_size if self._display_view_index == 1 else (
+                cvi_card.width(), cvi_card.height()
+            )
+            preview_sizes = (raw, ndvi, cvi)
+        else:
+            cards = self.main_cards[1:]
+            preview_sizes = tuple(
+                (card.image.width(), card.image.height()) for card in cards
+            )
+        if (
+            any(min(size) < 2 for size in preview_sizes)
+            or preview_sizes == self._last_preview_size
+        ):
             return
-        self._last_preview_size = preview_size
-        self.preview_size_requested.emit(*preview_size)
+        self._last_preview_size = preview_sizes
+        self.preview_size_requested.emit(preview_sizes)
+
+    def open_settings(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Processing settings")
+        layout = QVBoxLayout(dialog)
+        enabled = QCheckBox("Temporal filter")
+        enabled.setChecked(self.temporal_enabled)
+        layout.addWidget(enabled)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("New frame weight"))
+        weight = QSpinBox()
+        weight.setRange(1, 100)
+        weight.setSuffix(" %")
+        weight.setValue(round(100 * self.temporal_weight))
+        weight.setEnabled(self.temporal_enabled)
+        row.addWidget(weight)
+        layout.addLayout(row)
+
+        def change_filter():
+            self.temporal_enabled = enabled.isChecked()
+            self.temporal_weight = weight.value() / 100
+            weight.setEnabled(self.temporal_enabled)
+            self.temporal_requested.emit(self.temporal_enabled, self.temporal_weight)
+
+        enabled.toggled.connect(change_filter)
+        weight.valueChanged.connect(change_filter)
+        self._add_mode_settings(layout)
+        dialog.exec()
+
+    def _add_mode_settings(self, layout):
+        pass
 
     def _style(self):
         s = self.marketing_settings
@@ -669,11 +723,6 @@ class MainWindow(QMainWindow):
                 border: 1px solid #DEDEDE;
                 border-radius: 9px
             }}
-            QFrame#percent {{
-                background: white;
-                border: 1px solid #CCCCCC;
-                border-radius: 5px
-            }}
             QPushButton {{
                 background: #008A96;
                 color: white;
@@ -709,6 +758,29 @@ class MainWindow(QMainWindow):
         if CONFIG_FILE.exists():
             with CONFIG_FILE.open("rb") as config_file:
                 settings = tomllib.load(config_file).get("settings", {})
+        settings.setdefault("SHOW_PROGRESS_CIRCLE", False)
+        if not isinstance(settings["SHOW_PROGRESS_CIRCLE"], bool):
+            raise ValueError("SHOW_PROGRESS_CIRCLE must be true or false")
+        settings.setdefault("TEMPORAL_ENABLED", True)
+        settings.setdefault("TEMPORAL_WEIGHT", 0.25)
+        if not isinstance(settings["TEMPORAL_ENABLED"], bool):
+            raise ValueError("TEMPORAL_ENABLED must be true or false")
+        weight = settings["TEMPORAL_WEIGHT"]
+        if (isinstance(weight, bool) or not isinstance(weight, (int, float))
+                or not math.isfinite(weight) or not 0 < weight <= 1):
+            raise ValueError("TEMPORAL_WEIGHT must be in (0, 1]")
+        for index in ("NDVI", "CVI"):
+            low_key, high_key = f"{index}_LOW_PERCENTILE", f"{index}_HIGH_PERCENTILE"
+            settings.setdefault(low_key, LOW_DEFAULT)
+            settings.setdefault(high_key, HIGH_DEFAULT)
+            low, high = settings[low_key], settings[high_key]
+            if type(low) is not int or type(high) is not int or not 0 <= low <= high - 2 <= 98:
+                raise ValueError(f"{index} percentiles require a gap of at least 2")
+        if "EXPOSURE_US" in settings and (
+            type(settings["EXPOSURE_US"]) is not int
+            or not 1 <= settings["EXPOSURE_US"] <= 2_147_483_647
+        ):
+            raise ValueError("EXPOSURE_US must be a positive camera exposure")
 
         messages = []
         for message_file in sorted(MESSAGE_DIR.glob("*.toml")):
@@ -766,11 +838,9 @@ class MainWindow(QMainWindow):
         self.exposure_label.setText(f"{value} us")
         self.exposure_requested.emit(value)
 
-    def change_percentiles(self, _):
-        low, high = self.low.value(), self.high.value()
-        self.low.set_limits(0, high - 1)
-        self.high.set_limits(low + 1, 100)
-        self.percentiles_requested.emit(low, high)
+    def change_percentiles(self, index, low, high):
+        getattr(self, f"{index}_contrast_label").setText(f"{low}-{high} %")
+        self.percentiles_requested.emit(index, low, high)
 
     @Slot(int, int)
     def update_frame_dimensions(self, width, height):
@@ -792,15 +862,14 @@ class MainWindow(QMainWindow):
 
     def enter_demo(self):
         self.demo_mode = True
+        self._display_view_index = 0
         self._was_maximized = self.isMaximized()
         self._normal_geometry = self.normalGeometry()
         self.stack.setCurrentWidget(self.demo_page)
         self.showFullScreen()
-        self.marketing_timer.start()
-        self._restart_view_progress()
-        self.view_timer.start()
         self._restart_message_progress()
-        self.message_progress_timer.start()
+        if self.marketing_settings["SHOW_PROGRESS_CIRCLE"]:
+            self.message_progress_timer.start()
         QTimer.singleShot(0, self._size_demo_layout)
         QTimer.singleShot(120, self._refresh_demo_views)
 
@@ -808,9 +877,10 @@ class MainWindow(QMainWindow):
         self.demo_mode = False
         self.marketing_timer.stop()
         self.message_progress_timer.stop()
-        self.view_timer.stop()
         self.message_progress.set_progress(0)
-        self.view_progress.set_progress(0)
+        if self._animation is not None:
+            self._animation.stop()
+            self._animation = None
         self.stack.setCurrentWidget(self.main_page)
         if self._was_maximized:
             self.showMaximized()
@@ -835,38 +905,22 @@ class MainWindow(QMainWindow):
 
     def _refresh_demo_views(self):
         images = self._view_images()
-        selected_name = VIEW_NAMES[self._display_view_index]
+        selected_name = ROTATING_VIEWS[self._display_view_index]
         self.demo_large.overlay.setText(self.view_title(selected_name))
         selected_image = images[selected_name]
         if selected_image is not None:
             self.demo_large.set_image(selected_image)
 
-        side_names = [name for name in VIEW_NAMES if name != selected_name]
-        for card, name in zip(self.demo_cards, side_names):
+        for card, name in zip(self.demo_cards, VIEW_NAMES):
             card.overlay.setText(self.view_title(name))
             image = images[name]
             if image is not None:
-                card.set_image(image)
+                card.set_image(
+                    image, raw_gamma=name == "RAW", smooth=name != "RAW"
+                )
 
     def view_title(self, name):
         return name
-
-    def next_view(self):
-        self._display_view_index = (self._display_view_index + 1) % len(VIEW_NAMES)
-        self._refresh_demo_views()
-        self._restart_view_progress()
-
-    def _restart_view_progress(self):
-        self._view_cycle_started = time.monotonic()
-        self.view_progress.set_progress(0)
-
-    def _update_view_progress(self):
-        if self._view_cycle_started is None:
-            return
-        duration = self.view_timer.interval() / 1000
-        self.view_progress.set_progress(
-            (time.monotonic() - self._view_cycle_started) / duration
-        )
 
     def apply_message(self):
         message = self.marketing_messages[self._marketing_index]
@@ -887,7 +941,10 @@ class MainWindow(QMainWindow):
 
     def next_message(self):
         if self._animation is not None:
+            if self.demo_mode and not self.marketing_timer.isActive():
+                self.marketing_timer.start()
             return
+        self.marketing_timer.stop()
         fade = float(self.marketing_settings.get("FADE_OUT_TIME", 1))
         self.message_progress.set_progress(1)
         group = QParallelAnimationGroup(self)
@@ -898,8 +955,13 @@ class MainWindow(QMainWindow):
             self._marketing_index = (self._marketing_index + 1) % len(
                 self.marketing_messages
             )
+            self._display_view_index = (
+                self._display_view_index + 1
+            ) % len(ROTATING_VIEWS)
+            self._request_preview_size()
             self.apply_message()
-            self._restart_message_progress()
+            if self.demo_mode:
+                self._restart_message_progress()
             inside = QParallelAnimationGroup(self)
             for effect in (self.message_effect, self.facts_effect):
                 inside.addAnimation(
@@ -919,8 +981,10 @@ class MainWindow(QMainWindow):
         group.start()
 
     def _restart_message_progress(self):
-        self._message_cycle_started = time.monotonic()
-        self.message_progress.set_progress(0)
+        if self.marketing_settings["SHOW_PROGRESS_CIRCLE"]:
+            self._message_cycle_started = time.monotonic()
+            self.message_progress.set_progress(0)
+        self.marketing_timer.start()
 
     def _update_message_progress(self):
         if self._message_cycle_started is None:
@@ -946,11 +1010,42 @@ class MainWindow(QMainWindow):
         SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         for name, image in zip(
-            ("color_image", "raw", "ndvi", "cvi"),
-            (self.color_image,) + self._last_images,
+            ("raw", "ndvi", "cvi"),
+            self._last_images,
         ):
             if image is not None:
                 cv2.imwrite(str(SNAPSHOT_DIR / f"{stamp}_{name}.png"), image)
+
+    def save_config(self):
+        updates = {
+            "TEMPORAL_ENABLED": self.temporal_enabled,
+            "TEMPORAL_WEIGHT": self.temporal_weight,
+        }
+        for index in ("NDVI", "CVI"):
+            low, high = getattr(self, f"{index.lower()}_contrast").values()
+            updates[f"{index}_LOW_PERCENTILE"] = low
+            updates[f"{index}_HIGH_PERCENTILE"] = high
+        exposure = (
+            self.exposure.value()
+            if self.exposure.isEnabled()
+            else self.worker._saved_exposure
+        )
+        if exposure is not None:
+            updates["EXPOSURE_US"] = exposure
+        try:
+            document = (
+                CONFIG_FILE.read_text(encoding="utf-8")
+                if CONFIG_FILE.exists() else "[settings]\n"
+            )
+            tomllib.loads(document)
+            content = update_settings_text(document, updates).encode("utf-8")
+            output = QSaveFile(str(CONFIG_FILE))
+            if not output.open(QSaveFile.WriteOnly):
+                raise OSError(output.errorString())
+            if output.write(content) != len(content) or not output.commit():
+                raise OSError(output.errorString())
+        except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
+            QMessageBox.critical(self, "Cannot save configuration", str(exc))
 
     def keyPressEvent(self, event):
         if self.demo_mode and event.key() == Qt.Key_Escape:
@@ -972,7 +1067,6 @@ class MainWindow(QMainWindow):
         self.gui_timer.stop()
         self.marketing_timer.stop()
         self.message_progress_timer.stop()
-        self.view_timer.stop()
         if self._animation:
             self._animation.stop()
         self.worker.stop_worker()

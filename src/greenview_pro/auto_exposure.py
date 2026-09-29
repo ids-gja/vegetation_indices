@@ -3,15 +3,18 @@
 import numpy as np
 
 
-WHITE_LEVEL = 4095  # AR2020 BayerGR12, right-aligned in uint16 frames.
-SATURATED_FRACTION = 0.01
+WHITE_LEVEL = 255
+SATURATED_FRACTION = 0.001
 EXPOSURE_PRECISION_US = 100
 
 
 class ExposureSearch:
-    def __init__(self, minimum, maximum, initial):
+    def __init__(self, minimum, maximum, initial, white_level=WHITE_LEVEL):
         if minimum <= 0 or maximum < minimum:
             raise ValueError("Invalid camera exposure range")
+        if white_level <= 0:
+            raise ValueError("Sensor white level must be positive")
+        self.white_level = white_level
         self.minimum = int(minimum)
         self.maximum = int(maximum)
         self.exposure = max(self.minimum, min(int(initial), self.maximum))
@@ -26,7 +29,7 @@ class ExposureSearch:
         image = np.asarray(raw)
         if image.ndim != 2 or min(image.shape) < 2:
             raise ValueError("Autoexposure requires a two-dimensional Bayer frame")
-        saturated = np.count_nonzero(image >= WHITE_LEVEL)
+        saturated = np.count_nonzero(image >= self.white_level)
         if saturated < SATURATED_FRACTION * image.size:
             self.safe = self.exposure
         else:

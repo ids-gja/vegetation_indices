@@ -1,11 +1,22 @@
+Metadata-Version: 2.4
+Name: ids-greenview-pro
+Version: 3.1.0
+Summary: Live RAW, NDVI, and CVI visualization for IDS cameras
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: matplotlib
+Requires-Dist: numpy
+Requires-Dist: opencv-python
+Requires-Dist: PySide6
+
 # IDS GreenView Pro
 
-Desktop application for live RAW, NDVI, and CVI visualization with IDS cameras.
+Desktop application for live RAW, NDVI, CVI, and TVI visualization with IDS cameras.
 
 ## Project layout
 
 ```text
-src/ndvi_processing/           Reusable Bayer extraction and NDVI/CVI computation
+src/ndvi_processing/           Reusable Bayer extraction and NDVI/CVI/TVI computation
   resources/                   Sensor and filter spectra
 src/greenview_pro/              Qt-free camera acquisition and frame renderer; Qt demo adapter
   resources/                   Demo icons, images, messages, and config
@@ -42,44 +53,28 @@ passing them to the reusable index processor. To use
 white-target calibration on lighting setups without adjustable channel voltages,
 start `greenview-pro --calibration` (or `python -m greenview_pro --calibration`).
 Only this mode loads saved calibration and applies calibrated gains. The gear
-menu is available in both modes; calibration mode also provides the
-white-target calibration action. Exposure and contrast remain in the top bar:
-separate NDVI and CVI percentile bars are stacked vertically. Each adjusts
-its own 0-100 percentile range using two grips; dragging the selected area
-moves both bounds together. A gap of at least two percentage points is
-preserved. Both indices start at 30% and 80%.
-Camera and calibration status messages occupy a separate row so they cannot
-shift the controls. Contrast affects display colors, not the underlying index
-values. The save icon writes the current filter settings, both contrast ranges,
-and exposure to the packaged app `config.toml`; the outlined save icon writes
-RAW/NDVI/CVI image snapshots. A saved exposure is restored on the next launch
-instead of starting autoexposure.
+menu is available in both modes for optional median filtering of index images
+(off by default; 3x3 or 5x5). In calibration mode it also provides the
+white-target calibration action. Exposure and contrast remain in the top bar.
+Contrast controls affect display colors, not the underlying index values.
 
 ## Live preview performance
 
 The normal view packs four camera-aspect image cards with a 1 px gap. Each
-live card requests its own display-sized image; fullscreen requests separate
-sizes for its large and side cards. Each 2x2 Bayer cell becomes a float R/G/NIR
-superpixel, averaging both green sites. Calibration and vegetation indices
-are calculated once at native superpixel resolution, with no median filter.
-For the live view, an exponential temporal average (25% new frame) smooths
-each R/G/NIR superpixel across frames before calculating indices. It preserves
-spatial resolution for a still scene but takes several frames to respond to
-scene changes. The average is reset on exposure, camera, calibration, sensor
-size, and black-level changes; RAW previews and direct `indices()` calls stay
-unfiltered. The gear menu in both modes can disable the filter or adjust its
-1-100% new-frame weight (100% means no temporal smoothing). Standalone renderers
-can call `reset_temporal()` when acquisition settings change.
-Only the finished index images are resized for each card. The full-resolution
-RAW frame is retained until its final display scaling and for calibration
-and autoexposure. This prioritizes detail over frame rate and memory. Both
+live card requests its own display-sized preview; fullscreen requests separate
+sizes for its large and side cards. The Bayer frame is downscaled without
+mixing color sites *before* index computation. Index inputs use twice the
+requested card dimensions because each Bayer channel is half the RAW width and
+height; duplicate sizes reuse the same calculation. The optional median
+filter operates on calculated index values before display normalization.
+Full-resolution frames are still used for calibration and autoexposure. Both
 views preserve the camera frame's aspect ratio.
 The app starts maximized, with exposure, contrast, snapshots, and fullscreen
 demo controls together in the top panel. Calibration controls appear only
 with `--calibration`.
 RAW cards use display-only gamma 2.2 to brighten the preview; snapshots retain
 the original, ungamma-corrected 8-bit RAW preview. Snapshots include RAW, NDVI,
-and CVI, but not the static reference image.
+CVI, and TVI, but not the static reference image.
 
 Before starting acquisition, the camera sets `DeviceLinkThroughputLimit` to its
 maximum, temporarily minimizes exposure, and sets `AcquisitionFrameRate` to the
@@ -99,33 +94,23 @@ ongoing search and gives manual control.
 `src/greenview_pro/resources/config.toml` controls message timing, view rotation,
 view spacing, and styling.
 `VIEW_SPACING` defaults to 1 px and `DISPLAY_TIME` controls the synchronized
-fullscreen message and image cycle. `SHOW_PROGRESS_CIRCLE` defaults to `false`;
-set it to `true` to display the fullscreen message-cycle ring.
-`TEMPORAL_ENABLED` and `TEMPORAL_WEIGHT` default to `true` and `0.25`.
-The save icon writes these and current NDVI/CVI contrast bounds and exposure
-to this packaged file; a read-only installation will report a save error.
+fullscreen message and image cycle.
 Add a TOML file under `src/greenview_pro/resources/messages` to add a marketing message; each file defines a
 title, subtitle, and three `[[facts]]`.
-When enabled, the ring in the top-right tracks the shared cycle. The
-large image alternates NDVI and CVI when the message swaps; the side cards show
-the reference image, RAW, NDVI, and CVI in a 2x2 grid, including the selected
-index. The main image and the right-hand grid share an overall height and
-scale to the original camera frame aspect ratio, fitting the complete group
-within the window without resizing as Bayer previews round to even pixel
-dimensions.
+In fullscreen, the larger ring in the top-right tracks the shared cycle. The
+large image alternates NDVI and TVI when the message swaps; the side cards show
+the reference image, RAW, and the other index. The main image and three stacked
+side images share an overall height and scale to the original camera frame
+aspect ratio, fitting the complete group within the window without resizing as
+Bayer previews round to even pixel dimensions.
 
 ## Reusable vegetation calculations
 
-`src/ndvi_processing` supplies Bayer extraction and NDVI/CVI calculations.
+`src/ndvi_processing` supplies Bayer extraction and NDVI/CVI/TVI calculations.
 It can be imported independently by student projects and accepts raw GRBG
-frames without software calibration. The default index and white-target
-calibration paths both average the two green sites; saved calibrations made
-with the previous single-green-site method require a new white-target capture.
-The reusable `bayer_superpixels(raw, "GRBG")` and
-`resize_superpixels(triplets, (width, height))` helpers expose reusable float
-scaling; the live renderer instead scales finished index images. White-target
-calibration math and hardware/UI integration live entirely in
-`src/calibration`; only the opt-in mode constructs a processor with a calibration.
+frames without software calibration. White-target calibration math and
+hardware/UI integration live entirely in `src/calibration`; only the opt-in
+mode constructs a processor with a calibration.
 
 Live acquisition and display rendering can also be used without starting Qt:
 
@@ -137,7 +122,7 @@ frames = FrameProcessor()
 with CameraSession() as camera:
     raw = camera.read()  # Independent, full-resolution NumPy Bayer frame
     indices = frames.indices(raw)  # Native-resolution, unfiltered values
-    raw_image, ndvi_image, cvi_image = frames.render(raw, (1280, 960))
+    raw_image, ndvi_image, cvi_image, tvi_image = frames.render(raw, (1280, 960))
 ```
 
 `CameraSession` requires the IDS peak SDK and its Python bindings, but neither
@@ -152,7 +137,7 @@ from ndvi_processing import NDVIProcessor, SensorConfig
 qe = files("ndvi_processing").joinpath("resources", "sensor_AR2020.csv")
 processor = NDVIProcessor(SensorConfig("AR2020", "GRBG", qe, black_level=2))
 indices = processor.process_raw(raw_bayer_frame).indices
-ndvi, cvi = (indices[name] for name in ("ndvi", "cvi"))
+ndvi, cvi, tvi = (indices[name] for name in ("ndvi", "cvi", "tvi"))
 ```
 
 Set `black_level` to the camera's actual DN setting (the standalone processor
@@ -190,5 +175,6 @@ matching red, green, and blue; missing or ambiguous matches cause a clear error
 rather than silently using a different gain. If the camera lacks per-channel
 linear Gain nodes or saved settings are incompatible, the status explains why the preview is
 uncalibrated. Recalibrate after changing optical setup or hardware gains.
-Exposure remains adjustable after calibration; NDVI and CVI are ratios.
-Their contrast percentiles remain adjustable independently of calibration.
+Exposure remains adjustable after calibration as requested; absolute TVI values
+then vary with exposure, while NDVI/CVI are ratios. Contrast percentiles remain
+adjustable independently of calibration.

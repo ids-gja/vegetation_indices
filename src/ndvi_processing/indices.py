@@ -15,16 +15,18 @@ def calculate_indices(
     red: np.ndarray,
     green: np.ndarray,
     nir: np.ndarray,
-    *,
-    tvi_scale: float = 1.0,
 ) -> dict[str, np.ndarray]:
-    """Calculate NDVI, CVI, and TVI without Python loops over pixels."""
+    """Calculate NDVI and CVI without Python loops over pixels."""
     red, green, nir = (
         np.asarray(value, dtype=np.float32) for value in (red, green, nir)
     )
     if red.shape != green.shape or red.shape != nir.shape:
         raise ValueError("red, green, and nir must have identical shapes")
+
+    # coreect ir parasitic influence on R, B
+    red -= nir
+    green -= nir
+
     ndvi = _safe_divide(nir - red, nir + red)
     cvi = _safe_divide(nir * red, green * green)
-    tvi = 0.5 * (120.0 * (nir - green) - 200.0 * (red - green)) * tvi_scale
-    return {"ndvi": ndvi, "cvi": cvi, "tvi": tvi.astype(np.float32, copy=False)}
+    return {"ndvi": ndvi, "cvi": cvi}

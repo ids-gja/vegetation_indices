@@ -50,7 +50,7 @@ def sensor(**overrides):
 
 
 @pytest.mark.parametrize("calibration", [None, "omitted"])
-def test_uncalibrated_grbg_uses_raw_channels_without_white_balance(calibration):
+def test_uncalibrated_grbg_averages_both_green_sites(calibration):
     processor = (
         NDVIProcessor(sensor()) if calibration == "omitted"
         else NDVIProcessor(sensor(), calibration=None)
@@ -58,11 +58,28 @@ def test_uncalibrated_grbg_uses_raw_channels_without_white_balance(calibration):
     result = processor.process_raw(RAW_GRBG)
 
     np.testing.assert_array_equal(result.red, [[2, 6]])
-    np.testing.assert_array_equal(result.green, [[4, 8]])
+    np.testing.assert_array_equal(result.green, [[12, 10]])
     np.testing.assert_array_equal(result.nir, [[10, 18]])
     np.testing.assert_allclose(result.indices["ndvi"], [[2 / 3, 0.5]])
-    np.testing.assert_allclose(result.indices["cvi"], [[1.25, 1.6875]])
-    np.testing.assert_array_equal(result.indices["tvi"], [[560, 800]])
+    np.testing.assert_allclose(result.indices["cvi"], [[20 / 144, 108 / 100]])
+    assert set(result.indices) == {"ndvi", "cvi"}
+
+
+def test_float_superpixel_channels_share_raw_calibration_and_index_math():
+    raw = np.array([[4, 2], [10, 20]], dtype=np.uint16)
+    processor = NDVIProcessor(sensor(black_level=2))
+    channels = {
+        "R": np.array([[2.0]], dtype=np.float32),
+        "G": np.array([[12.0]], dtype=np.float32),
+        "NIR": np.array([[10.0]], dtype=np.float32),
+    }
+    from_raw = processor.process_raw(raw)
+    from_channels = processor.process_channels(channels)
+    np.testing.assert_array_equal(from_channels.green, [[10]])
+    for name in ("ndvi", "cvi"):
+        np.testing.assert_allclose(
+            from_channels.indices[name], from_raw.indices[name]
+        )
 
 
 def test_explicit_calibration_applies_offsets_gains_and_matrix():
@@ -74,11 +91,11 @@ def test_explicit_calibration_applies_offsets_gains_and_matrix():
     result = NDVIProcessor(sensor(), calibration).process_raw(RAW_GRBG)
 
     np.testing.assert_array_equal(result.red, [[18, 42]])
-    np.testing.assert_array_equal(result.green, [[1, 3]])
+    np.testing.assert_array_equal(result.green, [[5, 4]])
     np.testing.assert_array_equal(result.nir, [[2, 10]])
     np.testing.assert_allclose(result.indices["ndvi"], [[-0.8, -32 / 52]])
-    np.testing.assert_allclose(result.indices["cvi"], [[36, 420 / 9]])
-    np.testing.assert_array_equal(result.indices["tvi"], [[-1640, -3480]])
+    np.testing.assert_allclose(result.indices["cvi"], [[36 / 25, 420 / 16]])
+    assert set(result.indices) == {"ndvi", "cvi"}
 
 
 def test_default_worker_sample_uses_uncalibrated_raw_values():

@@ -4,7 +4,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QDoubleSpinBox, QFrame, QPushButton, QSpinBox
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFrame, QPushButton, QSpinBox
 
 from greenview_pro import app
 from calibration.ui import CalibrationWindow
@@ -23,8 +23,33 @@ def test_calibration_gear_opens_frame_count_dialog(monkeypatch):
         dialog.accept()
 
     QTimer.singleShot(0, inspect_dialog)
-    window.calibration_button.click()
+    window.open_calibration()
     window.close()
+
+
+def test_calibration_settings_offer_white_target_action(monkeypatch):
+    monkeypatch.setattr(CalibrationWindow.worker_class, "start", lambda self: None)
+    application = QApplication.instance() or QApplication([])
+    window = CalibrationWindow()
+    seen = []
+
+    def inspect():
+        dialog = next(w for w in application.topLevelWidgets() if isinstance(w, QDialog))
+        seen.append((
+            any(box.text() == "Temporal filter" for box in dialog.findChildren(QCheckBox)),
+            any(
+                button.text() == "White-target calibration"
+                for button in dialog.findChildren(QPushButton)
+            ),
+        ))
+        dialog.accept()
+
+    try:
+        QTimer.singleShot(0, inspect)
+        window.settings_button.click()
+        assert seen == [(True, True)]
+    finally:
+        window.close()
 
 
 @pytest.mark.parametrize("increment", [0.25, None])

@@ -3,8 +3,7 @@
 import tomllib
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Signal, Slot
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import Signal, Slot
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -13,16 +12,14 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSpinBox,
-    QToolButton,
     QVBoxLayout,
 )
 
-from greenview_pro.app import MainWindow
 from calibration.worker import CalibratedCameraWorker
+from greenview_pro.app import ICON_DIR, MainWindow
 
-
-ICON_FILE = Path(__file__).resolve().parent / "resources" / "gear.svg"
-CALIBRATION_CONFIG = Path(__file__).resolve().parent / "resources" / "config.toml"
+ICON_FILE = ICON_DIR / "gear.svg"
+CALIBRATION_CONFIG = Path(__file__).resolve().parent / "config.toml"
 
 
 class CalibrationWindow(MainWindow):
@@ -43,17 +40,15 @@ class CalibrationWindow(MainWindow):
 
     def _build_main(self):
         super()._build_main()
-        bar = self.main_page.layout().itemAt(0).widget().layout()
         self.calibration_status = QLabel("Uncalibrated preview")
-        bar.insertWidget(bar.count() - 1, self.calibration_status)
-        self.calibration_button = QToolButton()
-        self.calibration_button.setIcon(QIcon(str(ICON_FILE)))
-        self.calibration_button.setIconSize(QSize(22, 22))
-        self.calibration_button.setFixedSize(36, 36)
-        self.calibration_button.setToolTip("Calibrate camera")
-        self.calibration_button.setAccessibleName("Calibrate camera")
-        self.calibration_button.clicked.connect(self.open_calibration)
-        bar.insertWidget(bar.count() - 1, self.calibration_button)
+        self.calibration_status.setWordWrap(True)
+        self.status_layout.addWidget(self.calibration_status)
+        self.calibration_button = self.settings_button
+
+    def _add_mode_settings(self, layout):
+        button = QPushButton("White-target calibration")
+        button.clicked.connect(self.open_calibration)
+        layout.addWidget(button)
 
     def open_calibration(self):
         dialog = QDialog(self)

@@ -151,6 +151,8 @@ class CalibratedCameraWorker(CameraWorker):
             self.calibration_changed.emit(False, "Uncalibrated preview")
             return
         calibration = Calibration.load(CALIBRATION_FILE)
+        if calibration.metadata.get("green_mode") != "mean":
+            raise ValueError("Saved calibration uses the old green-site mode; recalibrate")
         controls = self._controls()
         auxiliary_selector = calibration.metadata.get("auxiliary_gain_selector")
         auxiliary_value = calibration.metadata.get("auxiliary_gain_value")
