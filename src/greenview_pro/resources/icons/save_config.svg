@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <g transform="translate(1 1) scale(.77)">
+    <path fill="#000" fill-rule="evenodd" d="M4 2h13l5 5v13a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Zm3 2v5.5h9V4H7Zm5 9.25a2.75 2.75 0 1 0 0 5.5 2.75 2.75 0 1 0 0-5.5Z"/>
+  </g>
+  <circle cx="18" cy="18" r="6" fill="#fff"/>
+  <g transform="translate(12.7 12.7) scale(.44)">
+    <path fill="#000" fill-rule="evenodd" d="M12 4a8 8 0 1 1 0 16 8 8 0 1 1 0-16Zm0 5.25a2.75 2.75 0 1 0 0 5.5 2.75 2.75 0 1 0 0-5.5Z"/>
+    <rect x="10.25" y="1" width="3.5" height="5" rx=".6"/>
+    <rect x="10.25" y="1" width="3.5" height="5" rx=".6" transform="rotate(45 12 12)"/>
+    <rect x="10.25" y="1" width="3.5" height="5" rx=".6" transform="rotate(90 12 12)"/>
+    <rect x="10.25" y="1" width="3.5" height="5" rx=".6" transform="rotate(135 12 12)"/>
+    <rect x="10.25" y="1" width="3.5" height="5" rx=".6" transform="rotate(180 12 12)"/>
+    <rect x="10.25" y="1" width="3.5" height="5" rx=".6" transform="rotate(225 12 12)"/>
+    <rect x="10.25" y="1" width="3.5" height="5" rx=".6" transform="rotate(270 12 12)"/>
+    <rect x="10.25" y="1" width="3.5" height="5" rx=".6" transform="rotate(315 12 12)"/>
+  </g>
+</svg>

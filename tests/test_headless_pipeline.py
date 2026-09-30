@@ -178,9 +178,9 @@ def test_temporal_filter_can_be_disabled_and_weight_adjusted():
 
     frame.processor.process_channels = record
     frame.render(raw)
-    assert frame._ndvi_bounds is not None and frame._cvi_bounds is not None
+    assert frame._ndvi_bounds is not None and frame._tvi_bounds is not None
     frame.set_temporal_filter(False, 0.25)
-    assert frame._ndvi_bounds is None and frame._cvi_bounds is None
+    assert frame._ndvi_bounds == (-1.0, 1.0) and frame._tvi_bounds is None
     frame.render(changed)
     assert seen[-1] == 68
     assert frame._temporal_superpixels is None
@@ -234,7 +234,7 @@ def test_invalid_native_index_does_not_blank_a_whole_display_pixel(monkeypatch):
     from greenview_pro import image_processing
 
     frame = FrameProcessor()
-    frame._ndvi_bounds = frame._cvi_bounds = (0, 1)
+    frame._ndvi_bounds = frame._tvi_bounds = (0, 1)
     original = frame.processor.process_channels
 
     def with_one_invalid(channels):
@@ -266,7 +266,7 @@ def test_native_indices_are_not_filtered_or_rescaled():
     np.testing.assert_allclose(indices["ndvi"][:, 1::2], 5 / 23)
 
 
-def test_renderer_returns_only_raw_ndvi_and_cvi():
+def test_renderer_returns_only_raw_ndvi_and_tvi():
     source = np.array(
         [
             [5, 10, 10, 10],
@@ -276,38 +276,71 @@ def test_renderer_returns_only_raw_ndvi_and_cvi():
         ],
         dtype=np.uint16,
     )
-    raw, ndvi, cvi = FrameProcessor().render(source, (4, 4))
-    assert cvi.shape == (4, 4, 3)
-    assert np.unique(cvi.reshape(-1, 3), axis=0).shape[0] > 1
-    assert not np.array_equal(cvi, ndvi)
+    raw, ndvi, tvi = FrameProcessor().render(source, (4, 4))
+    assert tvi.shape == (4, 4, 3)
+    assert np.unique(tvi.reshape(-1, 3), axis=0).shape[0] > 1
+    assert not np.array_equal(tvi, ndvi)
 
 
-def test_changing_one_index_percentile_keeps_other_bounds(monkeypatch):
+def test_ndvi_uses_absolute_score_bounds_without_percentile_calculation(monkeypatch):
     from greenview_pro import image_processing
 
     frame = FrameProcessor()
-    source = np.full((8, 8), 20, dtype=np.uint16)
-    frame.render(source)
-    cvi_bounds = frame._cvi_bounds
+    source = np.full((2, 6), 20, dtype=np.uint16)
+    original_process = frame.processor.process_channels
+
+    def fixed_indices(channels):
+        result = original_process(channels)
+        result.indices["ndvi"] = np.array([[-0.5, 0, 0.5]], dtype=np.float32)
+        return result
+
+    monkeypatch.setattr(frame.processor, "process_channels", fixed_indices)
     seen = []
-    original = image_processing.full_percentile_bounds
+    original_bounds = image_processing.full_percentile_bounds
+    original_heatmap = image_processing.heatmap
+    normalized = []
 
     def record(image, low, high):
         seen.append((low, high))
-        return original(image, low, high)
+        return original_bounds(image, low, high)
+
+    def capture(image):
+        normalized.append(image.copy())
+        return original_heatmap(image)
 
     monkeypatch.setattr(image_processing, "full_percentile_bounds", record)
-    frame.set_percentiles("ndvi", 20, 40)
-    assert frame._ndvi_bounds is None
-    assert frame._cvi_bounds == cvi_bounds
-    frame.render(source)
-    assert seen == [(20, 40)]
+    monkeypatch.setattr(image_processing, "heatmap", capture)
+    sizes = ((6, 2), (3, 1), (3, 1))
+    frame.render(source, sizes)
+    np.testing.assert_allclose(normalized[0], [[0.25, 0.5, 0.75]])
+    assert seen == [(30, 80)]
     seen.clear()
-    frame.set_percentiles("cvi", 10, 90)
-    frame.render(source)
+    normalized.clear()
+    frame.set_ndvi_bounds(-0.5, 0.5)
+    frame.render(source, sizes)
+    np.testing.assert_allclose(normalized[0], [[0, 0.5, 1]])
+    assert seen == []
+    frame.set_ndvi_bounds(0.27, 0.29)
+    assert frame.ndvi_bounds == (0.27, 0.29)
+    frame.set_percentiles("tvi", 10, 90)
+    frame.render(source, sizes)
     assert seen == [(10, 90)]
     with pytest.raises(ValueError, match="index"):
-        frame.set_percentiles("tvi", 20, 40)
+        frame.set_percentiles("ndvi", 20, 40)
+    for low, high in ((-1.1, 0), (0, 1.1), (0, 0.01), (float("nan"), 1)):
+        with pytest.raises(ValueError, match="NDVI"):
+            frame.set_ndvi_bounds(low, high)
+
+
+def test_tvi_percentiles_reset_only_the_tvi_display_bounds():
+    frame = FrameProcessor()
+    frame.render(np.full((4, 4), 20, dtype=np.uint16))
+    assert frame.percentiles == {"tvi": (30, 80)}
+    assert frame._tvi_bounds is not None
+    frame.set_percentiles("tvi", 10, 90)
+    assert frame.percentiles == {"tvi": (10, 90)}
+    assert frame._tvi_bounds is None
+    assert frame.ndvi_bounds == (-1.0, 1.0)
 
 
 def test_camera_read_copies_buffer_before_requeue(monkeypatch):

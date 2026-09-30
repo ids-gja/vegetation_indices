@@ -20,6 +20,8 @@ CONTROLS = (
     "camera_off",
     "fullscreen",
     "save",
+    "save_config",
+    "save_image",
     "gear",
 )
 

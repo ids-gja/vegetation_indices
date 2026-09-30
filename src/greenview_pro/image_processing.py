@@ -1,6 +1,7 @@
 """Qt-independent RAW Bayer processing and live display rendering."""
 
 from importlib.resources import files
+import math
 
 import cv2
 import matplotlib
@@ -88,13 +89,10 @@ class FrameProcessor:
         self.default_processor = NDVIProcessor(SensorConfig("AR2020", "GRBG", qe))
         self.processor = processor or self.default_processor
         self.black_level = black_level
-        self.percentiles = {
-            "ndvi": (LOW_DEFAULT, HIGH_DEFAULT),
-            "cvi": (LOW_DEFAULT, HIGH_DEFAULT),
-        }
+        self.percentiles = {"tvi": (LOW_DEFAULT, HIGH_DEFAULT)}
         self._normalization_frame = 0
-        self._ndvi_bounds = None
-        self._cvi_bounds = None
+        self._ndvi_bounds = (-1.0, 1.0)
+        self._tvi_bounds = None
         self._bounds_update_interval = 10
         self._bounds_smoothing = np.float32(0.25)
         self.temporal_enabled = True
@@ -112,7 +110,25 @@ class FrameProcessor:
             self.temporal_enabled = enabled
             self.temporal_weight = float(weight)
             self.reset_temporal()
-            self._ndvi_bounds = self._cvi_bounds = None
+            self._tvi_bounds = None
+
+    @property
+    def ndvi_bounds(self):
+        return self._ndvi_bounds
+
+    def set_ndvi_bounds(self, low, high):
+        if (
+            any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                for value in (low, high)
+            )
+            or not -1 <= low <= high <= 1
+            or high - low < 0.02 - 1e-9
+        ):
+            raise ValueError("NDVI bounds must span at least 0.02 within [-1, 1]")
+        self._ndvi_bounds = (float(low), float(high))
 
     def indices(self, raw):
         if self.processor is self.default_processor:
@@ -169,26 +185,21 @@ class FrameProcessor:
         }
         indices = self.processor.process_channels(channels).indices
         self._normalization_frame += 1
-        for name in ("ndvi", "cvi"):
-            attribute = f"_{name}_bounds"
-            old = getattr(self, attribute)
-            if old is None or self._normalization_frame % self._bounds_update_interval == 0:
-                new = full_percentile_bounds(
-                    indices[name], *self.percentiles[name]
-                )
-                if old is None:
-                    setattr(self, attribute, new)
-                    continue
+        old = self._tvi_bounds
+        if old is None or self._normalization_frame % self._bounds_update_interval == 0:
+            new = full_percentile_bounds(indices["tvi"], *self.percentiles["tvi"])
+            if old is None:
+                self._tvi_bounds = new
+            else:
                 a = self._bounds_smoothing
-                setattr(
-                    self, attribute,
-                    tuple((1 - a) * o + a * n for o, n in zip(old, new)),
+                self._tvi_bounds = tuple(
+                    (1 - a) * o + a * n for o, n in zip(old, new)
                 )
         preview = preview_bayer(raw, sizes[0])
         images = []
         for image, bounds, size in (
             (indices["ndvi"], self._ndvi_bounds, sizes[1]),
-            (indices["cvi"], self._cvi_bounds, sizes[2]),
+            (indices["tvi"], self._tvi_bounds, sizes[2]),
         ):
             image = normalize_with_bounds(image, *bounds)
             height, width = image.shape

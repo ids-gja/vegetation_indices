@@ -1,5 +1,6 @@
 """Qt-independent IDS camera acquisition and device configuration."""
 
+from contextlib import contextmanager
 import re
 
 import numpy as np
@@ -8,7 +9,9 @@ from ids_peak import ids_peak, ids_peak_ipl_extension
 from greenview_pro.camera_gains import reset_color_gains
 
 INITIAL_EXPOSURE_US = 3500
-BLACK_LEVEL_DN = 2.0
+EXPOSURE_MIN_US = 10_000
+EXPOSURE_MAX_US = 150_000
+BLACK_LEVEL_DN = 0
 
 
 def sensor_white_level(nodemap):
@@ -26,44 +29,86 @@ def maximize_frame_rate(nodemap):
     throughput = nodemap.FindNode("DeviceLinkThroughputLimit")
     exposure = nodemap.FindNode("ExposureTime")
     frame_rate = nodemap.FindNode("AcquisitionFrameRate")
-    throughput.SetValue(throughput.Maximum())
-    exposure.SetValue(exposure.Minimum())
-
-    link_limit = nodemap.FindNode("DeviceLinkAcquisitionFrameRateLimit")
-    target_fps = min(float(link_limit.Value()), float(frame_rate.Maximum()))
-    if not np.isfinite(target_fps) or target_fps <= 0:
-        raise ValueError(f"Camera reported an invalid maximum frame rate: {target_fps}")
-    frame_rate.SetValue(target_fps)
-    actual_fps = float(frame_rate.Value())
-    if not np.isfinite(actual_fps) or actual_fps <= 0:
-        raise ValueError(f"Camera reported an invalid frame rate: {actual_fps}")
-
-    minimum = int(np.ceil(exposure.Minimum()))
-    maximum = int(np.floor(min(exposure.Maximum(), 1_000_000 / actual_fps)))
-    if maximum < minimum:
-        raise ValueError("Maximum frame rate leaves no usable exposure range")
-    for _ in range(8):
-        exposure.SetValue(float(maximum))
-        supported_fps = min(float(frame_rate.Maximum()), float(link_limit.Value()))
-        if supported_fps >= actual_fps * (1 - 1e-5):
-            frame_rate.SetValue(min(actual_fps, float(frame_rate.Maximum())))
-            if min(float(frame_rate.Value()), float(link_limit.Value())) >= actual_fps * (
-                1 - 1e-5
-            ):
-                break
-        if not np.isfinite(supported_fps) or supported_fps <= 0 or maximum <= minimum:
-            raise ValueError("Camera cannot sustain the selected frame rate")
-        shortfall_us = int(
-            np.ceil(1_000_000 / supported_fps - 1_000_000 / actual_fps)
+    current_exposure = float(exposure.Value())
+    previous_fps = float(frame_rate.Value())
+    previous_throughput = float(throughput.Value())
+    if not np.isfinite(current_exposure) or current_exposure <= 0:
+        raise ValueError(f"Camera reported an invalid exposure: {current_exposure}")
+    try:
+        throughput.SetValue(throughput.Maximum())
+        link_limit = nodemap.FindNode("DeviceLinkAcquisitionFrameRateLimit")
+        target_fps = min(
+            float(link_limit.Value()),
+            float(frame_rate.Maximum()),
+            1_000_000 / current_exposure,
         )
-        maximum = max(minimum, maximum - max(1, shortfall_us + 1))
-    else:
-        raise ValueError("Camera frame rate did not stabilize at maximum exposure")
-    return minimum, maximum, actual_fps
+        if not np.isfinite(target_fps) or target_fps <= 0:
+            raise ValueError(f"Camera reported an invalid maximum frame rate: {target_fps}")
+        frame_rate.SetValue(target_fps)
+        actual_fps = float(frame_rate.Value())
+        if not np.isfinite(actual_fps) or actual_fps <= 0:
+            raise ValueError(f"Camera reported an invalid frame rate: {actual_fps}")
+        if not np.isclose(exposure.Value(), current_exposure, rtol=0, atol=1e-6):
+            raise RuntimeError("Camera changed exposure while maximizing frame rate")
+        return actual_fps
+    except (ValueError, RuntimeError, ids_peak.Exception):
+        if not np.isclose(throughput.Value(), previous_throughput, rtol=0, atol=1e-6):
+            throughput.SetValue(previous_throughput)
+        if not np.isclose(frame_rate.Value(), previous_fps, rtol=0, atol=1e-6):
+            frame_rate.SetValue(previous_fps)
+        if not np.isclose(exposure.Value(), current_exposure, rtol=0, atol=1e-6):
+            exposure.SetValue(current_exposure)
+        raise
+
+
+def _needs_slower_frame_rate(nodemap, value):
+    exposure = nodemap.FindNode("ExposureTime")
+    frame_rate = nodemap.FindNode("AcquisitionFrameRate")
+    previous_exposure = float(exposure.Value())
+    current_fps = float(frame_rate.Value())
+    if not np.isfinite(current_fps) or current_fps <= 0:
+        raise ValueError(f"Camera reported an invalid frame rate: {current_fps}")
+    if current_fps > 1_000_000 / value:
+        return True
+    try:
+        exposure.SetValue(float(value))
+    except (ValueError, ids_peak.Exception):
+        return True
+    if np.isclose(exposure.Value(), value, rtol=0, atol=1):
+        return False
+    exposure.SetValue(previous_exposure)
+    return True
+
+
+def _set_exposure_with_slower_frame_rate(nodemap, value):
+    exposure = nodemap.FindNode("ExposureTime")
+    frame_rate = nodemap.FindNode("AcquisitionFrameRate")
+    previous_exposure = float(exposure.Value())
+    previous_fps = float(frame_rate.Value())
+    frame_rate.SetValue(frame_rate.Minimum())
+    try:
+        exposure.SetValue(float(value))
+        target = min(
+            previous_fps,
+            float(frame_rate.Maximum()),
+            float(nodemap.FindNode("DeviceLinkAcquisitionFrameRateLimit").Value()),
+            1_000_000 / float(exposure.Value()),
+        )
+        if not np.isfinite(target) or target <= 0:
+            raise ValueError(f"Camera reported an invalid frame rate: {target}")
+        frame_rate.SetValue(target)
+        if not np.isclose(exposure.Value(), value, rtol=0, atol=1):
+            raise RuntimeError("Camera changed exposure while adjusting frame rate")
+    except (ValueError, RuntimeError, ids_peak.Exception):
+        if not np.isclose(exposure.Value(), previous_exposure, rtol=0, atol=1e-6):
+            exposure.SetValue(previous_exposure)
+        frame_rate.SetValue(previous_fps)
+        raise
+    return int(round(exposure.Value()))
 
 
 def configure_camera_exposure(
-    nodemap, minimum, maximum, requested_us=INITIAL_EXPOSURE_US
+    nodemap, minimum, maximum, requested_us=None
 ):
     black_level = nodemap.FindNode("BlackLevel")
     black_level.SetValue(BLACK_LEVEL_DN)
@@ -71,7 +116,12 @@ def configure_camera_exposure(
         raise ValueError(f"camera BlackLevel must be {BLACK_LEVEL_DN} DN")
 
     exposure = nodemap.FindNode("ExposureTime")
-    exposure.SetValue(float(np.clip(requested_us, minimum, maximum)))
+    if requested_us is None:
+        requested_us = exposure.Value()
+    selected = float(np.clip(requested_us, minimum, maximum))
+    if not np.isclose(exposure.Value(), selected, rtol=0, atol=1e-6):
+        if _needs_slower_frame_rate(nodemap, selected):
+            return _set_exposure_with_slower_frame_rate(nodemap, selected)
     return int(round(exposure.Value()))
 
 
@@ -88,8 +138,40 @@ class CameraSession:
         self.exposure = None
         self.black_level = None
         self.white_level = 255
+        self.configured_exposure_min = EXPOSURE_MIN_US
+        self.configured_exposure_max = EXPOSURE_MAX_US
 
-    def open(self, requested_exposure=INITIAL_EXPOSURE_US):
+    def set_exposure_limits(self, minimum, maximum):
+        if (
+            type(minimum) is not int or type(maximum) is not int
+            or minimum < 1 or minimum >= maximum or maximum > 2_147_483_647
+        ):
+            raise ValueError("Exposure limits must be increasing positive microseconds")
+        self.configured_exposure_min = minimum
+        self.configured_exposure_max = maximum
+
+    def _supported_exposure_range(self):
+        exposure = self.remote.FindNode("ExposureTime")
+        frame_rate = self.remote.FindNode("AcquisitionFrameRate")
+        current_fps = float(frame_rate.Value())
+        current_exposure = float(exposure.Value())
+        minimum = max(self.configured_exposure_min, int(np.ceil(exposure.Minimum())))
+        maximum = int(np.floor(exposure.Maximum()))
+        if maximum < self.configured_exposure_max:
+            frame_rate.SetValue(frame_rate.Minimum())
+            try:
+                maximum = int(np.floor(exposure.Maximum()))
+            finally:
+                frame_rate.SetValue(current_fps)
+        maximum = min(self.configured_exposure_max, maximum)
+        if not np.isclose(exposure.Value(), current_exposure, rtol=0, atol=1e-6):
+            exposure.SetValue(current_exposure)
+            raise RuntimeError("Camera changed exposure while reading its limits")
+        if minimum > maximum:
+            raise ValueError("Configured exposure range is unsupported by the camera")
+        return minimum, maximum
+
+    def open(self, requested_exposure=None):
         if self.stream is not None:
             raise RuntimeError("Camera is already open")
         if not self.library_open:
@@ -105,7 +187,7 @@ class CameraSession:
             self.device = devices[0].OpenDevice(ids_peak.DeviceAccessType_Control)
             self.remote = self.device.RemoteDevice().NodeMaps()[0]
             self.white_level = sensor_white_level(self.remote)
-            self.exposure_min, self.exposure_cap, _ = maximize_frame_rate(self.remote)
+            self.exposure_min, self.exposure_cap = self._supported_exposure_range()
             payload = self.remote.FindNode("PayloadSize").Value()
             self.exposure = configure_camera_exposure(
                 self.remote, self.exposure_min, self.exposure_cap, requested_exposure
@@ -146,10 +228,34 @@ class CameraSession:
     def set_exposure(self, value):
         if self.remote is None:
             raise RuntimeError("Camera is not open")
-        node = self.remote.FindNode("ExposureTime")
-        node.SetValue(float(value))
-        self.exposure = int(round(node.Value()))
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError("Exposure must be positive and finite")
+        if _needs_slower_frame_rate(self.remote, value):
+            with self._paused_acquisition():
+                self.exposure = _set_exposure_with_slower_frame_rate(
+                    self.remote, value
+                )
+        else:
+            self.exposure = int(round(self.remote.FindNode("ExposureTime").Value()))
         return self.exposure
+
+    @contextmanager
+    def _paused_acquisition(self):
+        if self.remote is None or self.stream is None:
+            raise RuntimeError("Camera is not acquiring")
+        stop = self.remote.FindNode("AcquisitionStop")
+        stop.Execute()
+        stop.WaitUntilDone()
+        try:
+            yield
+        finally:
+            start = self.remote.FindNode("AcquisitionStart")
+            start.Execute()
+            start.WaitUntilDone()
+
+    def maximize_fps_for_exposure(self):
+        with self._paused_acquisition():
+            return maximize_frame_rate(self.remote)
 
     def close(self):
         try:

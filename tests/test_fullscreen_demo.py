@@ -20,6 +20,22 @@ def demo_window(monkeypatch):
     return application, window
 
 
+def test_fullscreen_requests_faster_fps_without_changing_preview_exposure(monkeypatch):
+    monkeypatch.setattr(app.CameraWorker, "start", lambda self: None)
+    application = QApplication.instance() or QApplication([])
+    window = app.MainWindow()
+    try:
+        window.worker.set_exposure(80_000)
+        assert not window.worker._pending_frame_rate
+        window.enter_demo()
+        assert window.worker._pending_frame_rate
+        assert window.worker._saved_exposure == 80_000
+        window.exit_demo()
+        assert window.worker._maximize_on_reconnect
+    finally:
+        window.close()
+
+
 def wait_for_demo(condition):
     for _ in range(100):
         if condition():
@@ -66,23 +82,84 @@ def test_normal_preview_uses_source_aspect_and_compact_grid(monkeypatch):
 def test_fullscreen_uses_display_sized_preview_after_normal_mode(monkeypatch):
     application, window = demo_window(monkeypatch)
     try:
-        assert window._last_preview_size[1] == (
-            window.demo_large.image.width(), window.demo_large.image.height()
-        )
+        large = (window.demo_large.image.width(), window.demo_large.image.height())
+        assert window._last_preview_size[1] == large
         assert window._last_preview_size[0] == (
             window.demo_cards[1].image.width(), window.demo_cards[1].image.height()
         )
-        assert window._last_preview_size[2] == (
-            window.demo_cards[3].image.width(), window.demo_cards[3].image.height()
-        )
+        assert window._last_preview_size[2] == large
         window._display_view_index = 1
         window._request_preview_size()
-        assert window._last_preview_size[2] == (
-            window.demo_large.image.width(), window.demo_large.image.height()
+        assert window._last_preview_size[1:] == (large, large)
+    finally:
+        window.close()
+
+
+def test_slideshow_never_enlarges_a_previous_side_card_frame(monkeypatch):
+    application, window = demo_window(monkeypatch)
+    try:
+        raw = np.tile(np.array([[40, 20], [30, 40]], dtype=np.uint16), (400, 640))
+        large = (window.demo_large.image.width(), window.demo_large.image.height())
+        old_sizes = (
+            (window.demo_cards[1].image.width(), window.demo_cards[1].image.height()),
+            large,
+            (window.demo_cards[3].image.width(), window.demo_cards[3].image.height()),
         )
-        assert window._last_preview_size[1] == (
-            window.demo_cards[2].image.width(), window.demo_cards[2].image.height()
-        )
+        old_frame = window.worker._frame_processor.render(raw, old_sizes)
+        window._last_images = old_frame
+        window._last_image_sizes = old_sizes
+        window._refresh_demo_views()
+        assert window.demo_large._array is old_frame[1]
+
+        window._display_view_index = 1
+        window._request_preview_size()
+        window._refresh_demo_views()
+        assert window.demo_large._array is not old_frame[2]
+
+        new_frame = window.worker._process(raw, 0)
+        window._last_images = new_frame
+        window._last_image_sizes = window.worker._render_sizes
+        window._refresh_demo_views()
+        assert window.demo_large._array is new_frame[2]
+        assert new_frame[2].shape == new_frame[1].shape
+        assert new_frame[2].shape[1] > old_frame[2].shape[1]
+    finally:
+        window.close()
+
+
+def test_worker_publishes_the_sizes_used_to_render_the_latest_frame():
+    worker = app.CameraWorker()
+    raw = np.tile(np.array([[40, 20], [30, 40]], dtype=np.uint16), (4, 4))
+    sizes = ((8, 8), (10, 10), (6, 6))
+    worker.set_preview_sizes(sizes)
+    images = worker._process(raw, 0)
+    with worker._latest_lock:
+        worker._latest, worker._latest_version = images, 1
+        worker._latest_sizes = worker._render_sizes
+    assert worker.latest() == (images, 1)
+    assert worker.latest(include_sizes=True) == (images, 1, sizes)
+
+
+def test_entering_fullscreen_waits_for_large_index_instead_of_scaling_normal_preview(
+    monkeypatch,
+):
+    monkeypatch.setattr(app.CameraWorker, "start", lambda self: None)
+    application = QApplication.instance() or QApplication([])
+    window = app.MainWindow()
+    try:
+        window.show()
+        application.processEvents()
+        normal_sizes = window._last_preview_size
+        raw = np.tile(np.array([[40, 20], [30, 40]], dtype=np.uint16), (400, 640))
+        window._last_images = window.worker._process(raw, 0)
+        window._last_image_sizes = normal_sizes
+        window.enter_demo()
+        application.processEvents()
+        assert window.demo_large._array is None
+        window._last_images = window.worker._process(raw, 0)
+        window._last_image_sizes = window.worker._render_sizes
+        window._refresh_demo_views()
+        assert window.demo_large._array is window._last_images[1]
     finally:
         window.close()
 
@@ -94,7 +171,10 @@ def test_gamma_brightens_only_the_displayed_raw_cards(monkeypatch):
     raw = np.full((8, 8, 3), 64, dtype=np.uint8)
     indices = tuple(np.full_like(raw, 64) for _ in range(2))
     try:
-        monkeypatch.setattr(window.worker, "latest", lambda: ((raw, *indices), 1))
+        monkeypatch.setattr(
+            window.worker, "latest",
+            lambda include_sizes=False: ((raw, *indices), 1, None),
+        )
         window.pull_latest()
         expected = round(255 * (64 / 255) ** (1 / 2.2))
         assert window.main_cards[1]._array[0, 0, 0] == expected
@@ -161,7 +241,7 @@ def test_message_and_large_index_swap_together(monkeypatch):
         window._refresh_demo_views()
         assert window.demo_large.overlay.text() == "NDVI"
         assert [card.overlay.text() for card in window.demo_cards] == [
-            "REFERENCE IMAGE", "RAW", "NDVI", "CVI"
+            "REFERENCE IMAGE", "RAW", "NDVI", "TVI"
         ]
         assert window.demo_large._array is window.demo_cards[2]._array
         initial_message = window.demo_title.text()
@@ -169,9 +249,9 @@ def test_message_and_large_index_swap_together(monkeypatch):
         assert window.demo_large.overlay.text() == "NDVI"
         wait_for_demo(lambda: window._animation is None)
         assert window.demo_title.text() != initial_message
-        assert window.demo_large.overlay.text() == "CVI"
+        assert window.demo_large.overlay.text() == "TVI"
         assert [card.overlay.text() for card in window.demo_cards] == [
-            "REFERENCE IMAGE", "RAW", "NDVI", "CVI"
+            "REFERENCE IMAGE", "RAW", "NDVI", "TVI"
         ]
         assert window.demo_large._array is window.demo_cards[3]._array
         assert window.marketing_timer.isActive()
@@ -179,8 +259,20 @@ def test_message_and_large_index_swap_together(monkeypatch):
         wait_for_demo(lambda: window._animation is None)
         assert window.demo_large.overlay.text() == "NDVI"
         assert [card.overlay.text() for card in window.demo_cards] == [
-            "REFERENCE IMAGE", "RAW", "NDVI", "CVI"
+            "REFERENCE IMAGE", "RAW", "NDVI", "TVI"
         ]
+    finally:
+        window.close()
+
+
+def test_packaged_presentation_calls_the_second_index_tvi(monkeypatch):
+    application, window = demo_window(monkeypatch)
+    try:
+        assert any(
+            title == "TVI"
+            for message in window.marketing_messages
+            for title, _ in message["facts"]
+        )
     finally:
         window.close()
 
@@ -234,7 +326,7 @@ def test_fullscreen_layout_adapts_to_live_sensor_aspect(monkeypatch):
         monkeypatch.setattr(
             window.worker,
             "latest",
-            lambda: ((live_frame, live_frame, live_frame), 1),
+            lambda include_sizes=False: ((live_frame, live_frame, live_frame), 1, None),
         )
         window.pull_latest()
         application.processEvents()
@@ -264,8 +356,8 @@ def test_fullscreen_layout_stays_fixed_as_bayer_preview_rounds(monkeypatch):
             monkeypatch.setattr(
                 window.worker,
                 "latest",
-                lambda frame=frame, version=version: (
-                    (frame, frame, frame), version
+                lambda include_sizes=False, frame=frame, version=version: (
+                    (frame, frame, frame), version, None
                 ),
             )
             window.pull_latest()

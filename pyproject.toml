@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ids-greenview-pro"
 version = "3.1.0"
-description = "Live RAW, NDVI, and CVI visualization for IDS cameras"
+description = "Live RAW, NDVI, and TVI visualization for IDS cameras"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,6 +13,7 @@ dependencies = [
     "numpy",
     "opencv-python",
     "PySide6",
+    "ids-peak"
 ]
 
 [project.scripts]

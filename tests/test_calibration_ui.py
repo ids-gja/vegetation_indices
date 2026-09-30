@@ -52,6 +52,21 @@ def test_calibration_settings_offer_white_target_action(monkeypatch):
         window.close()
 
 
+def test_calibration_tvi_label_reflects_uncalibrated_state(monkeypatch):
+    monkeypatch.setattr(CalibrationWindow.worker_class, "start", lambda self: None)
+    application = QApplication.instance() or QApplication([])
+    window = CalibrationWindow()
+    try:
+        window.update_calibration(False, "Uncalibrated preview")
+        assert window.main_cards[3].overlay.text() == "TVI (UNCALIBRATED)"
+        assert window.view_title("TVI") == "TVI (UNCALIBRATED)"
+        window.update_calibration(True, "Calibrated")
+        assert window.main_cards[3].overlay.text() == "TVI"
+        assert window.view_title("TVI") == "TVI"
+    finally:
+        window.close()
+
+
 @pytest.mark.parametrize("increment", [0.25, None])
 def test_calibration_dialog_offers_camera_auxiliary_gain(monkeypatch, increment):
     monkeypatch.setattr(CalibrationWindow.worker_class, "start", lambda self: None)

@@ -44,14 +44,17 @@ class CameraWorker(QThread):
         self._initial_exposure = INITIAL_EXPOSURE_US
         self._black_level = BLACK_LEVEL_DN
         self._auto_exposure = None
-        self._auto_exposure_available = True
+        self._auto_exposure_available = False
         self._auto_settle_frames = 0
         self._camera = CameraSession()
         self._latest = None
         self._latest_version = 0
+        self._latest_sizes = None
         self._latest_lock = Lock()
         self._settings_lock = Lock()
         self._pending_temporal = None
+        self._pending_frame_rate = False
+        self._maximize_on_reconnect = False
         self._preview_size = DEFAULT_PREVIEW_SIZE
         self._source_dimensions = None
         self._frame_processor = FrameProcessor()
@@ -77,12 +80,12 @@ class CameraWorker(QThread):
         self._frame_processor._ndvi_bounds = value
 
     @property
-    def _cvi_bounds(self):
-        return self._frame_processor._cvi_bounds
+    def _tvi_bounds(self):
+        return self._frame_processor._tvi_bounds
 
-    @_cvi_bounds.setter
-    def _cvi_bounds(self, value):
-        self._frame_processor._cvi_bounds = value
+    @_tvi_bounds.setter
+    def _tvi_bounds(self, value):
+        self._frame_processor._tvi_bounds = value
 
     def start_camera(self):
         self._wanted = True
@@ -97,6 +100,10 @@ class CameraWorker(QThread):
     def set_percentiles(self, index, low, high):
         self._frame_processor.set_percentiles(index, low, high)
 
+    @Slot(float, float)
+    def set_ndvi_bounds(self, low, high):
+        self._frame_processor.set_ndvi_bounds(low, high)
+
     @Slot(bool, float)
     def set_temporal_filter(self, enabled, weight):
         validate_temporal_filter(enabled, weight)
@@ -108,15 +115,42 @@ class CameraWorker(QThread):
 
     @Slot(int)
     def set_exposure(self, value):
-        requested = int(value)
-        if self._exposure_cap is not None:
-            requested = max(self._exposure_min, min(requested, self._exposure_cap))
+        minimum = (
+            self._exposure_min
+            if self._exposure_min is not None else self._camera.configured_exposure_min
+        )
+        maximum = (
+            self._exposure_cap
+            if self._exposure_cap is not None else self._camera.configured_exposure_max
+        )
+        requested = max(minimum, min(int(value), maximum))
         self._saved_exposure = requested
         self._pending_exposure = requested
         self._auto_exposure = None
         self._auto_exposure_available = False
         self._auto_settle_frames = 0
         self._temporal_warmup_frames = 2
+
+    def set_exposure_limits(self, minimum, maximum):
+        self._camera.set_exposure_limits(minimum, maximum)
+
+    @Slot()
+    def request_maximum_frame_rate(self):
+        with self._settings_lock:
+            self._maximize_on_reconnect = True
+            self._pending_frame_rate = True
+
+    def _apply_pending_frame_rate(self):
+        with self._settings_lock:
+            pending = self._pending_frame_rate
+            self._pending_frame_rate = False
+        if pending:
+            try:
+                self._camera.maximize_fps_for_exposure()
+            except (ValueError, RuntimeError, ids_peak.Exception) as exc:
+                with self._settings_lock:
+                    self._maximize_on_reconnect = False
+                self.recoverable_error.emit(f"Cannot maximize frame rate: {exc}")
 
     @Slot(int, int)
     def set_preview_size(self, width, height):
@@ -153,6 +187,8 @@ class CameraWorker(QThread):
         self._temporal_reset_after_process = False
         self._exposure_min = exposure_minimum
         self._exposure_cap = exposure_maximum
+        with self._settings_lock:
+            self._pending_frame_rate = self._maximize_on_reconnect
         self._black_level = self._camera.black_level
         self._auto_exposure = (
             ExposureSearch(
@@ -242,15 +278,19 @@ class CameraWorker(QThread):
         if self._temporal_warmup_frames:
             self._frame_processor.reset_temporal()
             self._temporal_warmup_frames -= 1
-        result = self._frame_processor.render(raw, self._preview_size)
+        sizes = self._preview_size
+        result = self._frame_processor.render(raw, sizes)
+        self._render_sizes = (sizes,) * 3 if isinstance(sizes[0], int) else sizes
         if self._temporal_reset_after_process:
             self._frame_processor.reset_temporal()
             self._temporal_warmup_frames = 2
             self._temporal_reset_after_process = False
         return result
 
-    def latest(self):
+    def latest(self, include_sizes=False):
         with self._latest_lock:
+            if include_sizes:
+                return self._latest, self._latest_version, self._latest_sizes
             return self._latest, self._latest_version
 
     def run(self):
@@ -293,6 +333,10 @@ class CameraWorker(QThread):
                             self._pending_exposure
                         )
                         self._pending_exposure = None
+                        self.exposure_range.emit(
+                            self._exposure_min, self._exposure_cap, self._saved_exposure
+                        )
+                    self._apply_pending_frame_rate()
                     full_raw = self._camera.read()
                     self._note_frame_dimensions(full_raw)
                     self._advance_auto_exposure(full_raw)
@@ -307,6 +351,7 @@ class CameraWorker(QThread):
                     result = self._process(full_raw, smooth_fps)
                     with self._latest_lock:
                         self._latest = result
+                        self._latest_sizes = self._render_sizes
                         self._latest_version += 1
                 except Exception as exc:
                     connected = False

@@ -170,7 +170,7 @@ class CalibrationWindow(MainWindow):
         self._calibrated = calibrated
         self.calibration_status.setText(status)
         suffix = "" if calibrated else " (UNCALIBRATED)"
-        for card, name in ((self.main_cards[2], "NDVI"), (self.main_cards[3], "CVI")):
+        for card, name in ((self.main_cards[2], "NDVI"), (self.main_cards[3], "TVI")):
             card.overlay.setText(name + suffix)
         if self.demo_mode:
             self._refresh_demo_views()
@@ -189,6 +189,6 @@ class CalibrationWindow(MainWindow):
         self._gain_options = options
 
     def view_title(self, name):
-        if not self._calibrated and name in ("NDVI", "CVI"):
+        if not self._calibrated and name in ("NDVI", "TVI"):
             return name + " (UNCALIBRATED)"
         return name

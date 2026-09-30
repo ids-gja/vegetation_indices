@@ -10,5 +10,5 @@ title = "NDVI"
 detail = "Visualize vegetation vitality and stress patterns"
 
 [[facts]]
-title = "CVI"
-detail = "Highlight chlorophyll-related differences"
+title = "TVI"
+detail = "Highlight vegetation reflectance differences"

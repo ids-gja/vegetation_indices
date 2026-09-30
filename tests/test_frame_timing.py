@@ -68,32 +68,133 @@ class FakeCamera:
         return Limit()
 
 
-def test_maximize_frame_rate_sets_throughput_before_fps_and_caps_exposure():
+def test_maximize_frame_rate_preserves_exposure_and_uses_its_fps_limit():
     camera = FakeCamera()
-    minimum, maximum, fps = maximize_frame_rate(camera)
-    assert (minimum, maximum) == (18, 69_444)
-    assert fps == pytest.approx(14.4)
-    assert camera.exposure.value == maximum
+    fps = maximize_frame_rate(camera)
+    assert fps == pytest.approx(12.5)
+    assert camera.exposure.value == 80_000
     assert [name for name, _ in camera.events] == [
-        "throughput", "exposure", "fps", "exposure", "fps"
+        "throughput", "fps"
     ]
 
 
-def test_exposure_cap_accounts_for_camera_readout_time_when_fps_drops():
+def test_maximize_frame_rate_accounts_for_readout_without_changing_exposure():
     camera = FakeCamera(readout_us=1_000)
-    minimum, maximum, fps = maximize_frame_rate(camera)
-    assert minimum == 18
-    assert 68_400 <= maximum <= 68_444
-    assert fps == pytest.approx(14.4)
+    fps = maximize_frame_rate(camera)
+    assert fps == pytest.approx(1_000_000 / 81_000)
     assert camera.link_limit.Value() == pytest.approx(fps)
+    assert camera.exposure.value == 80_000
 
 
-def test_worker_never_requests_exposure_above_frame_rate_cap():
+def test_worker_caps_exposure_at_configured_limit_not_frame_rate():
     worker = CameraWorker()
-    worker._exposure_min = 18
-    worker._exposure_cap = 69_444
-    worker.set_exposure(100_000)
-    assert worker._pending_exposure == 69_444
+    worker.set_exposure_limits(10_000, 150_000)
+    worker._exposure_min = 10_000
+    worker._exposure_cap = 150_000
+    worker.set_exposure(180_000)
+    assert worker._pending_exposure == 150_000
+
+
+def test_worker_defers_fullscreen_fps_change_until_between_frames():
+    worker = CameraWorker()
+    camera = FakeCamera()
+    worker._camera.maximize_fps_for_exposure = lambda: maximize_frame_rate(camera)
+    worker.request_maximum_frame_rate()
+    assert camera.events == []
+    worker._apply_pending_frame_rate()
+    assert camera.exposure.value == 80_000
+    assert camera.fps.value == pytest.approx(12.5)
+
+
+def test_fullscreen_fps_request_survives_camera_reconnect():
+    worker = CameraWorker()
+    applied = []
+    worker._camera.open = lambda requested: (10_000, 150_000, 80_000)
+    worker._camera.maximize_fps_for_exposure = lambda: applied.append(True)
+    worker.request_maximum_frame_rate()
+    worker._open_camera()
+    worker._apply_pending_frame_rate()
+    worker._close_camera()
+    worker._open_camera()
+    worker._apply_pending_frame_rate()
+    assert applied == [True, True]
+
+
+def test_fullscreen_fps_failure_is_reported_without_reconnect_loop():
+    worker = CameraWorker()
+    errors = []
+    worker.recoverable_error.connect(errors.append)
+
+    def reject_change():
+        raise ValueError("FPS node unavailable")
+
+    worker._camera.maximize_fps_for_exposure = reject_change
+    worker.request_maximum_frame_rate()
+    worker._apply_pending_frame_rate()
+    assert errors == ["Cannot maximize frame rate: FPS node unavailable"]
+    assert not worker._maximize_on_reconnect
+    assert not worker._pending_frame_rate
+
+
+def test_fullscreen_frame_rate_change_pauses_acquisition_not_stream():
+    from greenview_pro.camera import CameraSession
+
+    camera = FakeCamera()
+    original_find = camera.FindNode
+    camera.FindNode = lambda name: (
+        SimpleNamespace(
+            Execute=lambda: camera.events.append((name, "execute")),
+            WaitUntilDone=lambda: None,
+        )
+        if name in ("AcquisitionStop", "AcquisitionStart")
+        else original_find(name)
+    )
+    session = CameraSession()
+    session.remote = camera
+    session.stream = object()
+    session.maximize_fps_for_exposure()
+    assert camera.events == [
+        ("AcquisitionStop", "execute"),
+        ("throughput", 300_000_000),
+        ("fps", 12.5),
+        ("AcquisitionStart", "execute"),
+    ]
+    assert camera.exposure.value == 80_000
+
+
+def test_fullscreen_restores_exposure_if_camera_alters_it():
+    camera = FakeCamera()
+    original_set = camera.fps.SetValue
+
+    def changes_exposure(value):
+        original_set(value)
+        if value != 7.2:
+            camera.exposure.value = 70_000
+
+    camera.fps.SetValue = changes_exposure
+    with pytest.raises(RuntimeError, match="changed exposure"):
+        maximize_frame_rate(camera)
+    assert camera.exposure.value == 80_000
+    assert camera.fps.value == 7.2
+    assert camera.throughput.value == 150_000_000
+
+
+def test_fullscreen_restores_exposure_after_fps_write_raises():
+    camera = FakeCamera()
+    original_set = camera.fps.SetValue
+
+    def partly_changes_fps_and_exposure(value):
+        original_set(value)
+        if value != 7.2:
+            camera.exposure.value = 70_000
+            raise ValueError("FPS write failed")
+
+    camera.fps.SetValue = partly_changes_fps_and_exposure
+    with pytest.raises(ValueError, match="FPS write failed"):
+        maximize_frame_rate(camera)
+    assert camera.exposure.value == 80_000
+    assert camera.fps.value == 7.2
+    assert camera.throughput.value == 150_000_000
 
 
 def test_manual_exposure_change_starts_new_temporal_history():
@@ -113,10 +214,10 @@ def test_manual_exposure_change_starts_new_temporal_history():
     worker.set_exposure(2400)
     worker._process(brighter, 0)
     worker._process(brighter, 0)
-    assert observed == [28, 68, 68]
+    assert observed == [30, 70, 70]
     worker._close_camera()
     worker._process(base, 0)
-    assert observed[-1] == 28
+    assert observed[-1] == 30
 
 
 def test_auto_exposure_change_does_not_blend_previous_exposure_into_next_frame():
@@ -142,7 +243,7 @@ def test_auto_exposure_change_does_not_blend_previous_exposure_into_next_frame()
     assert worker._advance_auto_exposure(base)
     worker._process(base, 0)
     worker._process(brighter, 0)
-    assert observed == [28, 28, 68]
+    assert observed == [30, 30, 70]
 
 
 def test_filter_setting_is_applied_by_worker_between_frames(monkeypatch):
@@ -156,7 +257,7 @@ def test_filter_setting_is_applied_by_worker_between_frames(monkeypatch):
     assert worker._frame_processor.temporal_weight == 0.5
 
 
-def test_connection_starts_acquisition_only_after_initial_exposure_and_black_level(monkeypatch):
+def test_connection_preserves_cockpit_exposure_and_fps_before_acquisition(monkeypatch):
     camera = FakeCamera()
     camera.black = FakeNode(0, 0, 10, camera.events, "black")
     gains = FakeMap()
@@ -196,11 +297,15 @@ def test_connection_starts_acquisition_only_after_initial_exposure_and_black_lev
     )
     worker = CameraWorker()
     worker._open_camera()
-    assert worker._auto_exposure.exposure == 3500
-    assert worker._auto_settle_frames == 2
+    assert worker._auto_exposure is None
+    assert worker._saved_exposure == 80_000
+    assert camera.fps.Value() == 7.2
+    assert not any(
+        name in ("exposure", "fps", "throughput") for name, _ in camera.events
+    )
 
 
-def test_reconnecting_does_not_restart_autoexposure_or_reset_its_last_exposure(monkeypatch):
+def test_reconnecting_preserves_the_preview_exposure_and_new_manual_selection(monkeypatch):
     camera = FakeCamera()
     gains = FakeMap()
     original_find = camera.FindNode
@@ -240,36 +345,170 @@ def test_reconnecting_does_not_restart_autoexposure_or_reset_its_last_exposure(m
     )
 
     manual_worker = CameraWorker()
-    manual_worker.set_exposure(2100)
+    manual_worker.set_exposure(21_000)
     manual_worker._open_camera()
     assert manual_worker._auto_exposure is None
-    assert camera.exposure.Value() == 2100
+    assert camera.exposure.Value() == 21_000
     manual_worker._close_camera()
 
     worker = CameraWorker()
     worker._open_camera()
-    worker._auto_settle_frames = 0
-    worker._advance_auto_exposure(np.full((8, 8), 100, dtype=np.uint16))
-    exposure_after_search = worker._saved_exposure
-    assert exposure_after_search > 3500
+    assert worker._auto_exposure is None
+    assert worker._saved_exposure == 21_000
     worker._close_camera()
     worker._open_camera()
     assert worker._auto_exposure is None
-    assert camera.exposure.Value() == exposure_after_search
+    assert camera.exposure.Value() == 21_000
 
-    worker.set_exposure(2100)
+    worker.set_exposure(30_000)
     worker._close_camera()
     worker._open_camera()
     assert worker._auto_exposure is None
-    assert camera.exposure.Value() == 2100
+    assert camera.exposure.Value() == 30_000
 
 
 def assert_start_settings(camera, gains):
-    assert camera.exposure.Value() == 3500
-    assert camera.black.Value() == 2
+    assert camera.exposure.Value() == 80_000
+    assert camera.black.Value() == 0
     assert {key: gains.gain.values[key] for key in ("Red", "Green", "Blue")} == {
         "Red": 1.0, "Green": 1.0, "Blue": 1.0
     }
+
+
+def test_configured_exposure_limits_must_be_increasing():
+    from greenview_pro.camera import CameraSession
+
+    session = CameraSession()
+    with pytest.raises(ValueError, match="Exposure limits"):
+        session.set_exposure_limits(150_000, 10_000)
+
+
+def test_exposure_slider_range_uses_camera_limit_at_slowest_fps():
+    from greenview_pro.camera import CameraSession
+
+    camera = FakeCamera()
+    camera.exposure.Maximum = lambda: min(
+        200_000, 1_000_000 / camera.fps.Value()
+    )
+    session = CameraSession()
+    session.remote = camera
+    assert session._supported_exposure_range() == (10_000, 150_000)
+    assert camera.fps.Value() == 7.2
+    assert camera.exposure.Value() == 80_000
+    assert camera.throughput.Value() == 150_000_000
+
+
+def test_exposure_range_without_hardware_overlap_is_rejected():
+    from greenview_pro.camera import CameraSession
+
+    camera = FakeCamera()
+    camera.exposure.minimum = 175_000
+    session = CameraSession()
+    session.remote = camera
+    with pytest.raises(ValueError, match="unsupported"):
+        session._supported_exposure_range()
+
+
+def test_manual_exposure_can_exceed_previous_frame_interval():
+    from greenview_pro.camera import CameraSession
+
+    camera = FakeCamera()
+    original_find = camera.FindNode
+    camera.FindNode = lambda name: (
+        SimpleNamespace(Execute=lambda: None, WaitUntilDone=lambda: None)
+        if name in ("AcquisitionStop", "AcquisitionStart")
+        else original_find(name)
+    )
+    original_set = camera.exposure.SetValue
+
+    def reject_if_fps_is_too_high(value):
+        if value > 1_000_000 / camera.fps.Value():
+            raise ValueError("Exposure exceeds current frame interval")
+        original_set(value)
+
+    camera.exposure.SetValue = reject_if_fps_is_too_high
+    session = CameraSession()
+    session.remote = camera
+    session.stream = object()
+    assert session.set_exposure(150_000) == 150_000
+    assert camera.fps.Value() == pytest.approx(1_000_000 / 150_000)
+    assert camera.throughput.Value() == 150_000_000
+
+
+def test_failed_long_exposure_restores_preview_frame_rate():
+    from greenview_pro.camera import CameraSession
+
+    camera = FakeCamera()
+    events = []
+    original_find = camera.FindNode
+    camera.FindNode = lambda name: (
+        SimpleNamespace(
+            Execute=lambda: events.append(name),
+            WaitUntilDone=lambda: None,
+        )
+        if name in ("AcquisitionStop", "AcquisitionStart")
+        else original_find(name)
+    )
+    camera.exposure.SetValue = lambda value: (_ for _ in ()).throw(
+        ValueError("Exposure unavailable")
+    )
+    session = CameraSession()
+    session.remote = camera
+    session.stream = object()
+    with pytest.raises(ValueError, match="Exposure unavailable"):
+        session.set_exposure(150_000)
+    assert camera.fps.Value() == 7.2
+    assert camera.exposure.Value() == 80_000
+    assert events == ["AcquisitionStop", "AcquisitionStart"]
+
+
+def test_manual_exposure_handles_camera_readout_time():
+    from greenview_pro.camera import CameraSession
+
+    camera = FakeCamera(readout_us=25_000)
+    original_find = camera.FindNode
+    camera.FindNode = lambda name: (
+        SimpleNamespace(Execute=lambda: None, WaitUntilDone=lambda: None)
+        if name in ("AcquisitionStop", "AcquisitionStart")
+        else original_find(name)
+    )
+    original_set = camera.exposure.SetValue
+
+    def reject_if_readout_exceeds_frame_interval(value):
+        if value + camera.readout_us > 1_000_000 / camera.fps.Value():
+            raise ValueError("Exposure and readout exceed frame interval")
+        original_set(value)
+
+    camera.exposure.SetValue = reject_if_readout_exceeds_frame_interval
+    session = CameraSession()
+    session.remote = camera
+    session.stream = object()
+    assert session.set_exposure(120_000) == 120_000
+    assert camera.fps.Value() == pytest.approx(1_000_000 / 145_000)
+    assert camera.exposure.Value() == 120_000
+
+
+def test_saved_exposure_adjusts_fps_before_acquisition():
+    from greenview_pro.camera import configure_camera_exposure
+
+    camera = FakeCamera(readout_us=1_000)
+    camera.black = FakeNode(0, 0, 10, camera.events, "black")
+    original_find = camera.FindNode
+    camera.FindNode = lambda name: (
+        camera.black if name == "BlackLevel" else original_find(name)
+    )
+    camera.fps.value = 14.4
+    original_set = camera.exposure.SetValue
+
+    def reject_until_fps_is_low_enough(value):
+        if value + camera.readout_us > 1_000_000 / camera.fps.Value():
+            raise ValueError("Exposure exceeds frame interval")
+        original_set(value)
+
+    camera.exposure.SetValue = reject_until_fps_is_low_enough
+    assert configure_camera_exposure(camera, 10_000, 150_000, 150_000) == 150_000
+    assert camera.fps.Value() == pytest.approx(1_000_000 / 151_000)
+    assert camera.throughput.Value() == 150_000_000
 
 
 def test_unity_gain_readback_failure_is_reported():

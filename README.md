@@ -1,11 +1,11 @@
 # IDS GreenView Pro
 
-Desktop application for live RAW, NDVI, and CVI visualization with IDS cameras.
+Desktop application for live RAW, NDVI, and TVI visualization with IDS cameras.
 
 ## Project layout
 
 ```text
-src/ndvi_processing/           Reusable Bayer extraction and NDVI/CVI computation
+src/ndvi_processing/           Reusable Bayer extraction and NDVI/TVI computation
   resources/                   Sensor and filter spectra
 src/greenview_pro/              Qt-free camera acquisition and frame renderer; Qt demo adapter
   resources/                   Demo icons, images, messages, and config
@@ -35,31 +35,35 @@ python -m greenview_pro
 
 The demo uses the camera's hardware-balanced R/G/NIR Bayer channels without
 loading saved calibration or applying software white balance. It sets the
-camera BlackLevel to 2 DN, sets the camera's Red, Green, and Blue (NIR-site)
+camera BlackLevel to 0 DN, sets the camera's Red, Green, and Blue (NIR-site)
 gains to 1.0, and verifies all four readbacks before acquisition. The live
-worker subtracts 2 DN from RAW Bayer values as floating-point numbers before
+worker subtracts the configured BlackLevel from RAW Bayer values before
 passing them to the reusable index processor. To use
 white-target calibration on lighting setups without adjustable channel voltages,
 start `greenview-pro --calibration` (or `python -m greenview_pro --calibration`).
 Only this mode loads saved calibration and applies calibrated gains. The gear
 menu is available in both modes; calibration mode also provides the
 white-target calibration action. Exposure and contrast remain in the top bar:
-separate NDVI and CVI percentile bars are stacked vertically. Each adjusts
-its own 0-100 percentile range using two grips; dragging the selected area
-moves both bounds together. A gap of at least two percentage points is
-preserved. Both indices start at 30% and 80%.
+separate NDVI and TVI contrast bars are stacked vertically. NDVI uses absolute
+index scores from -1.00 to +1.00 in 0.01 steps (defaulting to the full range);
+TVI uses image percentiles from 0 to 100 (defaulting to 30% and 80%).
+Each bar has two grips; dragging the selected area moves both bounds together.
+A gap of at least 0.02 for NDVI or two percentage points for TVI is preserved.
 Camera and calibration status messages occupy a separate row so they cannot
 shift the controls. Contrast affects display colors, not the underlying index
 values. The save icon writes the current filter settings, both contrast ranges,
 and exposure to the packaged app `config.toml`; the outlined save icon writes
-RAW/NDVI/CVI image snapshots. A saved exposure is restored on the next launch
-instead of starting autoexposure.
+RAW/NDVI/TVI image snapshots. Exposure is adjustable from 10 to 150 ms by
+default (subject to camera limits). A saved exposure is restored on the next
+launch; without one, preview starts at the camera's Cockpit exposure.
 
 ## Live preview performance
 
 The normal view packs four camera-aspect image cards with a 1 px gap. Each
-live card requests its own display-sized image; fullscreen requests separate
-sizes for its large and side cards. Each 2x2 Bayer cell becomes a float R/G/NIR
+live card requests its own display-sized image. Fullscreen renders both indices
+at the large card's size and scales their side-card copies down; it waits for a
+large-sized frame rather than enlarging an older small image after a view change.
+Each 2x2 Bayer cell becomes a float R/G/NIR
 superpixel, averaging both green sites. Calibration and vegetation indices
 are calculated once at native superpixel resolution, with no median filter.
 For the live view, an exponential temporal average (25% new frame) smooths
@@ -72,27 +76,26 @@ unfiltered. The gear menu in both modes can disable the filter or adjust its
 can call `reset_temporal()` when acquisition settings change.
 Only the finished index images are resized for each card. The full-resolution
 RAW frame is retained until its final display scaling and for calibration
-and autoexposure. This prioritizes detail over frame rate and memory. Both
+and camera acquisition. This prioritizes detail over frame rate and memory. Both
 views preserve the camera frame's aspect ratio.
 The app starts maximized, with exposure, contrast, snapshots, and fullscreen
 demo controls together in the top panel. Calibration controls appear only
 with `--calibration`.
 RAW cards use display-only gamma 2.2 to brighten the preview; snapshots retain
 the original, ungamma-corrected 8-bit RAW preview. Snapshots include RAW, NDVI,
-and CVI, but not the static reference image.
+and TVI, but not the static reference image.
 
-Before starting acquisition, the camera sets `DeviceLinkThroughputLimit` to its
-maximum, temporarily minimizes exposure, and sets `AcquisitionFrameRate` to the
-highest rate allowed by `DeviceLinkAcquisitionFrameRateLimit` and the camera.
-It probes the FPS-preserving exposure limit (reducing it if the camera reports
-a timing shortfall), then starts the first acquisition at 3.5 ms or the closest
-supported value. Once per app run, a binary exposure search finds the brightest
-exposure with fewer than 0.1% saturated RAW pixels. The clipping threshold
-comes from the camera pixel format when available (defaulting to 8-bit,
-255 DN). Reconnecting keeps the last
-exposure (clamped to the camera's FPS-preserving limit) without restarting the
-search. The exposure slider cannot exceed that limit; moving it stops any
-ongoing search and gives manual control.
+Preview starts with the frame rate and throughput configured in IDS peak Cockpit,
+lowering FPS only when the chosen exposure needs it; there is no automatic
+exposure search on startup. A saved `EXPOSURE_US` value
+overrides Cockpit exposure, but no saved value leaves the camera exposure
+untouched when it lies within the configured range. On entering fullscreen,
+acquisition pauses briefly while the app maximizes throughput and frame rate
+within the current exposure's limits, then resumes without changing exposure.
+Leaving fullscreen keeps the new frame rate. Reconnecting restores the chosen
+exposure and, after fullscreen was entered, its frame-rate policy. If a longer
+manually selected exposure needs a slower frame rate, preview lowers it just
+enough to allow that exposure.
 
 ## Configuration
 
@@ -102,13 +105,19 @@ view spacing, and styling.
 fullscreen message and image cycle. `SHOW_PROGRESS_CIRCLE` defaults to `false`;
 set it to `true` to display the fullscreen message-cycle ring.
 `TEMPORAL_ENABLED` and `TEMPORAL_WEIGHT` default to `true` and `0.25`.
-The save icon writes these and current NDVI/CVI contrast bounds and exposure
+The save icon writes these and current NDVI/TVI contrast bounds and exposure
 to this packaged file; a read-only installation will report a save error.
+`EXPOSURE_MIN_US` and `EXPOSURE_MAX_US` set the slider limits (defaulting to
+10,000 and 150,000 microseconds); the usable range is intersected with camera
+capabilities. `EXPOSURE_US` is optional and takes precedence over the exposure
+configured in Cockpit.
+TVI percentile settings use `TVI_LOW_PERCENTILE` and `TVI_HIGH_PERCENTILE`.
+Existing `CVI_*` settings are read on startup and removed on the next save.
 Add a TOML file under `src/greenview_pro/resources/messages` to add a marketing message; each file defines a
 title, subtitle, and three `[[facts]]`.
 When enabled, the ring in the top-right tracks the shared cycle. The
-large image alternates NDVI and CVI when the message swaps; the side cards show
-the reference image, RAW, NDVI, and CVI in a 2x2 grid, including the selected
+large image alternates NDVI and TVI when the message swaps; the side cards show
+the reference image, RAW, NDVI, and TVI in a 2x2 grid, including the selected
 index. The main image and the right-hand grid share an overall height and
 scale to the original camera frame aspect ratio, fitting the complete group
 within the window without resizing as Bayer previews round to even pixel
@@ -116,7 +125,8 @@ dimensions.
 
 ## Reusable vegetation calculations
 
-`src/ndvi_processing` supplies Bayer extraction and NDVI/CVI calculations.
+`src/ndvi_processing` supplies Bayer extraction and NDVI/TVI calculations.
+The TVI result uses the `tvi` dictionary key and the third render output.
 It can be imported independently by student projects and accepts raw GRBG
 frames without software calibration. The default index and white-target
 calibration paths both average the two green sites; saved calibrations made
@@ -137,7 +147,7 @@ frames = FrameProcessor()
 with CameraSession() as camera:
     raw = camera.read()  # Independent, full-resolution NumPy Bayer frame
     indices = frames.indices(raw)  # Native-resolution, unfiltered values
-    raw_image, ndvi_image, cvi_image = frames.render(raw, (1280, 960))
+    raw_image, ndvi_image, tvi_image = frames.render(raw, (1280, 960))
 ```
 
 `CameraSession` requires the IDS peak SDK and its Python bindings, but neither
@@ -150,9 +160,9 @@ from importlib.resources import files
 from ndvi_processing import NDVIProcessor, SensorConfig
 
 qe = files("ndvi_processing").joinpath("resources", "sensor_AR2020.csv")
-processor = NDVIProcessor(SensorConfig("AR2020", "GRBG", qe, black_level=2))
+processor = NDVIProcessor(SensorConfig("AR2020", "GRBG", qe, black_level=0))
 indices = processor.process_raw(raw_bayer_frame).indices
-ndvi, cvi = (indices[name] for name in ("ndvi", "cvi"))
+ndvi, tvi = (indices[name] for name in ("ndvi", "tvi"))
 ```
 
 Set `black_level` to the camera's actual DN setting (the standalone processor
@@ -190,5 +200,7 @@ matching red, green, and blue; missing or ambiguous matches cause a clear error
 rather than silently using a different gain. If the camera lacks per-channel
 linear Gain nodes or saved settings are incompatible, the status explains why the preview is
 uncalibrated. Recalibrate after changing optical setup or hardware gains.
-Exposure remains adjustable after calibration; NDVI and CVI are ratios.
-Their contrast percentiles remain adjustable independently of calibration.
+Exposure remains adjustable after calibration; NDVI is a ratio and TVI is a
+linear combination of the NIR, red, and green channels.
+Their display contrast remains adjustable independently of calibration: NDVI
+uses fixed score bounds and TVI uses image percentiles.

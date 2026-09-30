@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from greenview_pro.contrast_control import ContrastRange
+from greenview_pro.camera import EXPOSURE_MAX_US, EXPOSURE_MIN_US
 from greenview_pro.processing import HIGH_DEFAULT, LOW_DEFAULT, CameraWorker
 
 APP_NAME = "IDS GreenView Pro"
@@ -57,7 +58,7 @@ MESSAGE_DIR = DATA_DIR / "messages"
 SNAPSHOT_DIR = Path.cwd() / "snapshots"
 GUI_INTERVAL_MS = 66
 MESSAGE_PROGRESS_INTERVAL_MS = 16
-ROTATING_VIEWS = ("NDVI", "CVI")
+ROTATING_VIEWS = ("NDVI", "TVI")
 VIEW_NAMES = ("REFERENCE IMAGE", "RAW", *ROTATING_VIEWS)
 RAW_GAMMA_LUT = np.rint(
     255 * (np.arange(256, dtype=np.float32) / 255) ** (1 / 2.2)
@@ -79,6 +80,11 @@ def update_settings_text(document, updates):
     following = re.search(r"(?m)^\[", document[header.end():])
     end = header.end() + following.start() if following else len(document)
     section = document[header.end():end]
+    section = re.sub(
+        r"(?m)^[ \t]*(?:NDVI|CVI)_(?:LOW_PERCENTILE|HIGH_PERCENTILE)[ \t]*=[^\r\n]*(?:\r?\n|$)",
+        "",
+        section,
+    )
     for name, value in updates.items():
         encoded = (
             "true" if value is True else "false" if value is False else str(value)
@@ -224,7 +230,9 @@ class MainWindow(QMainWindow):
     start_requested = Signal()
     close_requested = Signal()
     exposure_requested = Signal(int)
+    max_fps_requested = Signal()
     percentiles_requested = Signal(str, int, int)
+    ndvi_bounds_requested = Signal(float, float)
     temporal_requested = Signal(bool, float)
     preview_size_requested = Signal(object)
 
@@ -236,6 +244,7 @@ class MainWindow(QMainWindow):
         self._normal_geometry = None
         self._was_maximized = False
         self._last_images = None
+        self._last_image_sizes = None
         self._last_gui_version = -1
         self._marketing_index = 0
         self._display_view_index = 0
@@ -258,15 +267,21 @@ class MainWindow(QMainWindow):
         self.start_requested.connect(self.worker.start_camera)
         self.close_requested.connect(self.worker.close_camera)
         self.exposure_requested.connect(self.worker.set_exposure)
+        self.max_fps_requested.connect(self.worker.request_maximum_frame_rate)
         self.percentiles_requested.connect(self.worker.set_percentiles)
+        self.ndvi_bounds_requested.connect(self.worker.set_ndvi_bounds)
         self.temporal_requested.connect(self.worker.set_temporal_filter)
         self.preview_size_requested.connect(self.worker.set_preview_sizes)
         self.worker.recoverable_error.connect(self.show_camera_error)
         self.worker.set_temporal_filter(self.temporal_enabled, self.temporal_weight)
-        for index in ("ndvi", "cvi"):
-            self.worker.set_percentiles(
-                index, *getattr(self, f"{index}_contrast").values()
-            )
+        self.worker.set_exposure_limits(
+            self.marketing_settings["EXPOSURE_MIN_US"],
+            self.marketing_settings["EXPOSURE_MAX_US"],
+        )
+        self.worker.set_ndvi_bounds(
+            *(value / 100 for value in self.ndvi_contrast.values())
+        )
+        self.worker.set_percentiles("tvi", *self.tvi_contrast.values())
         if "EXPOSURE_US" in self.marketing_settings:
             self.worker.set_exposure(self.marketing_settings["EXPOSURE_US"])
         self.worker.start()
@@ -299,7 +314,7 @@ class MainWindow(QMainWindow):
             ImageCard("REFERENCE IMAGE", smooth=True),
             ImageCard("RAW", smooth=False, raw_gamma=True),
             ImageCard("NDVI", smooth=True),
-            ImageCard("CVI", smooth=True),
+            ImageCard("TVI", smooth=True),
         ]
         if self.color_image is not None:
             cards[0].set_image(self.color_image)
@@ -358,39 +373,48 @@ class MainWindow(QMainWindow):
         contrast_rows = QVBoxLayout()
         contrast_rows.setContentsMargins(0, 0, 0, 0)
         contrast_rows.setSpacing(0)
-        for name in ("NDVI", "CVI"):
+        for name in ("NDVI", "TVI"):
+            index = name.lower()
             row = QHBoxLayout()
             title = QLabel(name)
             title.setFixedWidth(44)
             row.addWidget(title)
-            low = self.marketing_settings[f"{name}_LOW_PERCENTILE"]
-            high = self.marketing_settings[f"{name}_HIGH_PERCENTILE"]
-            control = ContrastRange(low, high)
-            control.setAccessibleName(f"{name} contrast percentile range")
-            control.changed.connect(
-                lambda low, high, index=name.lower(): self.change_percentiles(
-                    index, low, high
+            if index == "ndvi":
+                low = round(self.marketing_settings["NDVI_MIN"] * 100)
+                high = round(self.marketing_settings["NDVI_MAX"] * 100)
+                control = ContrastRange(low, high, minimum=-100, maximum=100)
+                control.setAccessibleName("NDVI score range")
+                control.changed.connect(self.change_ndvi_bounds)
+                text = f"{low / 100:+.2f} to {high / 100:+.2f}"
+            else:
+                low = self.marketing_settings["TVI_LOW_PERCENTILE"]
+                high = self.marketing_settings["TVI_HIGH_PERCENTILE"]
+                control = ContrastRange(low, high)
+                control.setAccessibleName("TVI contrast percentile range")
+                control.changed.connect(
+                    lambda low, high: self.change_percentiles("tvi", low, high)
                 )
-            )
+                text = f"{low}-{high} %"
             row.addWidget(control, 1)
-            label = QLabel(f"{low}-{high} %")
-            label.setFixedWidth(78)
+            label = QLabel(text)
+            label.setFixedWidth(112 if name == "NDVI" else 78)
             label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             row.addWidget(label)
-            setattr(self, f"{name.lower()}_contrast", control)
-            setattr(self, f"{name.lower()}_contrast_label", label)
+            setattr(self, f"{index}_contrast", control)
+            setattr(self, f"{index}_contrast_label", label)
             contrast_rows.addLayout(row)
         bar.addLayout(contrast_rows, 2)
         self.save_config_button = QToolButton()
-        self.save_config_button.setIcon(load_icon("save.svg"))
+        self.save_config_button.setIcon(load_icon("save_config.svg"))
         self.save_config_button.setIconSize(QSize(22, 22))
         self.save_config_button.setFixedSize(36, 36)
         self.save_config_button.setToolTip("Save current configuration")
         self.save_config_button.setAccessibleName("Save config")
         self.save_config_button.clicked.connect(self.save_config)
         bar.addWidget(self.save_config_button)
+        bar.addSpacing(6)
         self.snapshot_button = QToolButton()
-        self.snapshot_button.setIcon(load_icon("save.svg"))
+        self.snapshot_button.setIcon(load_icon("save_image.svg"))
         self.snapshot_button.setIconSize(QSize(22, 22))
         self.snapshot_button.setFixedSize(36, 36)
         self.snapshot_button.setStyleSheet(
@@ -630,15 +654,7 @@ class MainWindow(QMainWindow):
             large = self.demo_large.image.size()
             raw = (raw_card.width(), raw_card.height())
             large_size = (large.width(), large.height())
-            ndvi_card = self.demo_cards[2].image.size()
-            cvi_card = self.demo_cards[3].image.size()
-            ndvi = large_size if self._display_view_index == 0 else (
-                ndvi_card.width(), ndvi_card.height()
-            )
-            cvi = large_size if self._display_view_index == 1 else (
-                cvi_card.width(), cvi_card.height()
-            )
-            preview_sizes = (raw, ndvi, cvi)
+            preview_sizes = (raw, large_size, large_size)
         else:
             cards = self.main_cards[1:]
             preview_sizes = tuple(
@@ -769,18 +785,49 @@ class MainWindow(QMainWindow):
         if (isinstance(weight, bool) or not isinstance(weight, (int, float))
                 or not math.isfinite(weight) or not 0 < weight <= 1):
             raise ValueError("TEMPORAL_WEIGHT must be in (0, 1]")
-        for index in ("NDVI", "CVI"):
-            low_key, high_key = f"{index}_LOW_PERCENTILE", f"{index}_HIGH_PERCENTILE"
-            settings.setdefault(low_key, LOW_DEFAULT)
-            settings.setdefault(high_key, HIGH_DEFAULT)
-            low, high = settings[low_key], settings[high_key]
-            if type(low) is not int or type(high) is not int or not 0 <= low <= high - 2 <= 98:
-                raise ValueError(f"{index} percentiles require a gap of at least 2")
+        settings.setdefault("NDVI_MIN", -1.0)
+        settings.setdefault("NDVI_MAX", 1.0)
+        low, high = settings["NDVI_MIN"], settings["NDVI_MAX"]
+        if (
+            any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                for value in (low, high)
+            )
+            or not -1 <= low <= high <= 1
+            or any(
+                not math.isclose(value * 100, round(value * 100), abs_tol=1e-8)
+                for value in (low, high)
+            )
+            or round(high * 100) - round(low * 100) < 2
+        ):
+            raise ValueError("NDVI bounds require 0.01 steps and a gap of at least 0.02")
+        settings.setdefault(
+            "TVI_LOW_PERCENTILE", settings.get("CVI_LOW_PERCENTILE", LOW_DEFAULT)
+        )
+        settings.setdefault(
+            "TVI_HIGH_PERCENTILE", settings.get("CVI_HIGH_PERCENTILE", HIGH_DEFAULT)
+        )
+        settings.pop("CVI_LOW_PERCENTILE", None)
+        settings.pop("CVI_HIGH_PERCENTILE", None)
+        low, high = settings["TVI_LOW_PERCENTILE"], settings["TVI_HIGH_PERCENTILE"]
+        if type(low) is not int or type(high) is not int or not 0 <= low <= high - 2 <= 98:
+            raise ValueError("TVI percentiles require a gap of at least 2")
+        settings.setdefault("EXPOSURE_MIN_US", EXPOSURE_MIN_US)
+        settings.setdefault("EXPOSURE_MAX_US", EXPOSURE_MAX_US)
+        minimum = settings["EXPOSURE_MIN_US"]
+        maximum = settings["EXPOSURE_MAX_US"]
+        if (
+            type(minimum) is not int or type(maximum) is not int
+            or minimum < 1 or minimum >= maximum or maximum > 2_147_483_647
+        ):
+            raise ValueError("Exposure range requires increasing positive microseconds")
         if "EXPOSURE_US" in settings and (
             type(settings["EXPOSURE_US"]) is not int
-            or not 1 <= settings["EXPOSURE_US"] <= 2_147_483_647
+            or not minimum <= settings["EXPOSURE_US"] <= maximum
         ):
-            raise ValueError("EXPOSURE_US must be a positive camera exposure")
+            raise ValueError("EXPOSURE_US must be within the configured exposure range")
 
         messages = []
         for message_file in sorted(MESSAGE_DIR.glob("*.toml")):
@@ -794,7 +841,7 @@ class MainWindow(QMainWindow):
                 "facts": [
                     ("20 MP", "High spatial resolution"),
                     ("NDVI", "Vegetation vitality"),
-                    ("CVI", "Chlorophyll-related differences"),
+                    ("TVI", "Vegetation reflectance differences"),
                 ],
             }
         ]
@@ -813,11 +860,12 @@ class MainWindow(QMainWindow):
         }
 
     def pull_latest(self):
-        result, version = self.worker.latest()
+        result, version, sizes = self.worker.latest(include_sizes=True)
         if result is None or version == self._last_gui_version:
             return
         self._last_gui_version = version
         self._last_images = result
+        self._last_image_sizes = sizes
         if self.demo_mode:
             if self._demo_aspect_ratio != self._demo_image_aspect():
                 self._size_demo_layout()
@@ -842,6 +890,10 @@ class MainWindow(QMainWindow):
         getattr(self, f"{index}_contrast_label").setText(f"{low}-{high} %")
         self.percentiles_requested.emit(index, low, high)
 
+    def change_ndvi_bounds(self, low, high):
+        self.ndvi_contrast_label.setText(f"{low / 100:+.2f} to {high / 100:+.2f}")
+        self.ndvi_bounds_requested.emit(low / 100, high / 100)
+
     @Slot(int, int)
     def update_frame_dimensions(self, width, height):
         aspect = width / height
@@ -861,10 +913,12 @@ class MainWindow(QMainWindow):
         self.camera_status.setText(text)
 
     def enter_demo(self):
+        self.max_fps_requested.emit()
         self.demo_mode = True
         self._display_view_index = 0
         self._was_maximized = self.isMaximized()
         self._normal_geometry = self.normalGeometry()
+        self.demo_large.clear_image()
         self.stack.setCurrentWidget(self.demo_page)
         self.showFullScreen()
         self._restart_message_progress()
@@ -895,21 +949,31 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, self.refresh_visible)
 
     def _view_images(self):
-        raw, ndvi, cvi = self._last_images or (None, None, None)
+        raw, ndvi, tvi = self._last_images or (None, None, None)
         return {
             "REFERENCE IMAGE": self.color_image,
             "RAW": raw,
             "NDVI": ndvi,
-            "CVI": cvi,
+            "TVI": tvi,
         }
 
     def _refresh_demo_views(self):
         images = self._view_images()
         selected_name = ROTATING_VIEWS[self._display_view_index]
-        self.demo_large.overlay.setText(self.view_title(selected_name))
         selected_image = images[selected_name]
-        if selected_image is not None:
+        index = self._display_view_index + 1
+        ready = (
+            self._last_image_sizes is None
+            or (
+                self._last_preview_size is not None
+                and self._last_image_sizes[index] == self._last_preview_size[index]
+            )
+        )
+        if selected_image is not None and ready:
+            self.demo_large.overlay.setText(self.view_title(selected_name))
             self.demo_large.set_image(selected_image)
+        elif self.demo_large._array is not None:
+            self.demo_large.clear_image()
 
         for card, name in zip(self.demo_cards, VIEW_NAMES):
             card.overlay.setText(self.view_title(name))
@@ -1010,7 +1074,7 @@ class MainWindow(QMainWindow):
         SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         for name, image in zip(
-            ("raw", "ndvi", "cvi"),
+            ("raw", "ndvi", "tvi"),
             self._last_images,
         ):
             if image is not None:
@@ -1020,11 +1084,15 @@ class MainWindow(QMainWindow):
         updates = {
             "TEMPORAL_ENABLED": self.temporal_enabled,
             "TEMPORAL_WEIGHT": self.temporal_weight,
+            "EXPOSURE_MIN_US": self.marketing_settings["EXPOSURE_MIN_US"],
+            "EXPOSURE_MAX_US": self.marketing_settings["EXPOSURE_MAX_US"],
         }
-        for index in ("NDVI", "CVI"):
-            low, high = getattr(self, f"{index.lower()}_contrast").values()
-            updates[f"{index}_LOW_PERCENTILE"] = low
-            updates[f"{index}_HIGH_PERCENTILE"] = high
+        low, high = self.ndvi_contrast.values()
+        updates["NDVI_MIN"] = low / 100
+        updates["NDVI_MAX"] = high / 100
+        low, high = self.tvi_contrast.values()
+        updates["TVI_LOW_PERCENTILE"] = low
+        updates["TVI_HIGH_PERCENTILE"] = high
         exposure = (
             self.exposure.value()
             if self.exposure.isEnabled()

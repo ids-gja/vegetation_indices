@@ -92,20 +92,20 @@ def test_binary_search_selects_upper_cap_if_no_pixels_clip():
     assert search.exposure == 8000
 
 
-def test_worker_starts_at_three_point_five_ms_and_subtracts_two_dn():
+def test_worker_keeps_cockpit_exposure_and_uses_zero_black_level():
     worker = CameraWorker()
-    assert worker._initial_exposure == 3500
+    assert not worker._auto_exposure_available
     raw = np.array([[4, 12], [22, 8]], dtype=np.uint16)
     indices = worker._default_processor.process_raw(
         raw.astype(np.float32) - worker._black_level
     )
     assert worker._default_processor.sensor.black_level == 0
-    np.testing.assert_allclose(worker._raw_indices(raw)["ndvi"], [[1 / 3]])
-    np.testing.assert_array_equal(indices.red, [[10]])
-    np.testing.assert_array_equal(indices.green, [[4]])
-    np.testing.assert_array_equal(indices.nir, [[20]])
-    np.testing.assert_allclose(indices.indices["ndvi"], [[1 / 3]])
-    np.testing.assert_allclose(indices.indices["cvi"], [[12.5]])
+    np.testing.assert_allclose(worker._raw_indices(raw)["ndvi"], [[1]])
+    np.testing.assert_array_equal(indices.red, [[12]])
+    np.testing.assert_array_equal(indices.green, [[6]])
+    np.testing.assert_array_equal(indices.nir, [[22]])
+    np.testing.assert_allclose(indices.indices["ndvi"], [[1]])
+    np.testing.assert_allclose(indices.indices["tvi"], [[1320]])
 
 
 def test_programmatic_exposure_updates_do_not_cancel_autoexposure(monkeypatch):
@@ -113,17 +113,17 @@ def test_programmatic_exposure_updates_do_not_cancel_autoexposure(monkeypatch):
     application = QApplication.instance() or QApplication([])
     window = app.MainWindow()
     try:
-        window.worker._auto_exposure = new_search(maximum=8000)
-        window.configure_exposure(18, 8000, 3500)
+        window.worker._auto_exposure = new_search(minimum=10_000, maximum=150_000)
+        window.configure_exposure(10_000, 150_000, 35_000)
         assert window.worker._auto_exposure is not None
-        window.exposure.setValue(3400)
+        window.exposure.setValue(34_000)
         assert window.worker._auto_exposure is None
-        assert window.worker._pending_exposure == 3400
+        assert window.worker._pending_exposure == 34_000
     finally:
         window.close()
 
 
-def test_camera_initialization_sets_black_level_and_starting_exposure():
+def test_camera_initialization_preserves_cockpit_exposure_and_sets_black_level():
     from greenview_pro.processing import configure_camera_exposure
 
     camera = FakeCamera()
@@ -132,9 +132,9 @@ def test_camera_initialization_sets_black_level_and_starting_exposure():
     camera.FindNode = lambda name: (
         camera.black if name == "BlackLevel" else original_find(name)
     )
-    assert configure_camera_exposure(camera, 18, 69_444) == 3500
-    assert camera.exposure.Value() == 3500
-    assert camera.black.Value() == 2
+    assert configure_camera_exposure(camera, 10_000, 150_000) == 80_000
+    assert camera.exposure.Value() == 80_000
+    assert camera.black.Value() == 0
 
 
 def test_autoexposure_updates_the_camera_before_displaying_next_frame():
@@ -205,7 +205,7 @@ def test_optional_calibration_uses_read_back_black_level_and_stops_search():
     assert worker._black_level == 4
     np.testing.assert_allclose(
         worker._raw_indices(np.array([[6, 14], [24, 10]], dtype=np.uint16))["ndvi"],
-        [[1 / 3]],
+        [[1]],
     )
     assert worker._processor is worker._default_processor
     worker._camera_closed()

@@ -16,12 +16,13 @@ def test_live_indices_use_shared_processor_when_calibrated():
     )
     values = worker._raw_indices(np.array([[10, 20], [40, 10]], dtype=np.uint16))
     np.testing.assert_allclose(values["ndvi"], 1 / 3)
-    np.testing.assert_allclose(values["cvi"], 8)
+    np.testing.assert_allclose(values["tvi"], 8)
 
 
 def test_worker_captures_two_averaged_stages_and_restores_calibration(tmp_path, monkeypatch):
     monkeypatch.setattr(processing, "CALIBRATION_FILE", tmp_path / "calibration.json")
     worker = CameraWorker()
+    worker.set_ndvi_bounds(-0.4, 0.6)
     nodes = FakeMap()
     worker._remote = nodes
     worker._saved_exposure = 100
@@ -29,15 +30,18 @@ def test_worker_captures_two_averaged_stages_and_restores_calibration(tmp_path, 
     worker.request_calibration("first", 2, 2.0)
     for _ in range(4):
         worker._advance_calibration(raw)
+    assert worker._ndvi_bounds == (-0.4, 0.6)
     assert worker._first_gains == {"R": 2.0, "G": 4.0, "NIR": 1.0}
     worker.request_calibration("second", 2, 2.0)
     for _ in range(12):
         worker._advance_calibration(np.full((2, 2), 42, dtype=np.uint16))
     assert processing.CALIBRATION_FILE.is_file()
     assert worker._processor is not None
+    assert worker._ndvi_bounds == (-0.4, 0.6)
     worker._processor = None
     worker._load_calibration()
     assert worker._processor is not None
+    assert worker._ndvi_bounds == (-0.4, 0.6)
 
 
 def test_auxiliary_gain_is_applied_saved_restored_and_checked(tmp_path, monkeypatch):

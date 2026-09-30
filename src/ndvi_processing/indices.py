@@ -16,17 +16,31 @@ def calculate_indices(
     green: np.ndarray,
     nir: np.ndarray,
 ) -> dict[str, np.ndarray]:
-    """Calculate NDVI and CVI without Python loops over pixels."""
+    """Calculate NDVI and TVI without Python loops over pixels."""
     red, green, nir = (
         np.asarray(value, dtype=np.float32) for value in (red, green, nir)
     )
     if red.shape != green.shape or red.shape != nir.shape:
         raise ValueError("red, green, and nir must have identical shapes")
 
-    # coreect ir parasitic influence on R, B
-    red -= nir
-    green -= nir
+    # correct the parasitic NIR contamination in the red and green channels
+    red = np.subtract(red, nir)
+    green = np.subtract(green, nir)
+    np.maximum(red, 0, out=red)
+    np.maximum(green, 0, out=green)
 
-    ndvi = _safe_divide(nir - red, nir + red)
-    cvi = _safe_divide(nir * red, green * green)
-    return {"ndvi": ndvi, "cvi": cvi}
+    # tvi = 0.5 * (120 * (nir - green) - 200 * (red - green))
+    tvi = np.subtract(nir, green)
+    np.multiply(tvi, 120, out=tvi)
+    np.subtract(red, green, out=green)
+    np.multiply(green, 200, out=green)
+    np.subtract(tvi, green, out=tvi)
+    np.multiply(tvi, 0.5, out=tvi)
+
+    # ndvi = (nir - red) / (nir + red)
+    # Reuse the working planes after TVI to avoid NDVI numerator/denominator copies.
+    np.add(nir, red, out=green)
+    np.subtract(nir, red, out=red)
+    ndvi = _safe_divide(red, green)
+
+    return {"ndvi": ndvi, "tvi": tvi}

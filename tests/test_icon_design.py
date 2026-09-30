@@ -40,6 +40,26 @@ def test_save_has_rectangular_slot_and_circular_opening():
     assert image.pixelColor(48, 80).alpha() > 0  # beneath the circle
 
 
+def test_save_badges_distinguish_config_from_image(monkeypatch):
+    monkeypatch.setattr(app.CameraWorker, "start", lambda self: None)
+    application = QApplication.instance() or QApplication([])
+    window = app.MainWindow()
+    try:
+        config = window.save_config_button.icon().pixmap(QSize(96, 96)).toImage()
+        snapshot = window.snapshot_button.icon().pixmap(QSize(96, 96)).toImage()
+        assert not config.isNull() and not snapshot.isNull()
+        assert config != snapshot
+        assert config.pixelColor(72, 52).alpha() > 0  # gear tooth
+        assert snapshot.pixelColor(72, 52).alpha() == 0  # above image rectangle
+        assert snapshot.pixelColor(72, 62).alpha() > 0  # image outline
+        layout = window.controls.layout().itemAt(0).layout()
+        gap = layout.itemAt(layout.indexOf(window.save_config_button) + 1).spacerItem()
+        assert gap is not None
+        assert 4 <= gap.sizeHint().width() <= 8
+    finally:
+        window.close()
+
+
 def test_save_and_settings_are_matching_accessible_icon_buttons(monkeypatch):
     monkeypatch.setattr(CalibrationWindow.worker_class, "start", lambda self: None)
     application = QApplication.instance() or QApplication([])

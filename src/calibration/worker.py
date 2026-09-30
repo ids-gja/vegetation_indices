@@ -67,7 +67,7 @@ class CalibratedCameraWorker(CameraWorker):
             self._first_gains = None
             self._first_auxiliary_gain = None
             self._processor = self._default_processor
-            self._ndvi_bounds = self._cvi_bounds = None
+            self._tvi_bounds = None
             self.calibration_changed.emit(False, "Uncalibrated preview")
             if auxiliary_selector:
                 actual = self._controls().apply_auxiliary(auxiliary_selector, auxiliary_value)
@@ -140,7 +140,7 @@ class CalibratedCameraWorker(CameraWorker):
             calibration.save(CALIBRATION_FILE)
             self._calibration = calibration
             self._processor = processor
-            self._ndvi_bounds = self._cvi_bounds = None
+            self._tvi_bounds = None
             self.calibration_changed.emit(True, "Calibrated")
             self.calibration_step.emit(f"Calibration saved to {CALIBRATION_FILE}")
         self._capture_stage = None
@@ -176,7 +176,7 @@ class CalibratedCameraWorker(CameraWorker):
         self._calibration = calibration
         self._validate_calibration()
         self._processor = make_processor(calibration, controls.read())
-        self._ndvi_bounds = self._cvi_bounds = None
+        self._tvi_bounds = None
         self.calibration_changed.emit(True, "Calibrated")
 
     def _validate_calibration(self):
@@ -208,7 +208,7 @@ class CalibratedCameraWorker(CameraWorker):
         if self._black_level != value:
             self._black_level = value
             if self._processor is self._default_processor:
-                self._ndvi_bounds = self._cvi_bounds = None
+                self._tvi_bounds = None
 
     def _camera_opened(self):
         self._set_default_black_level(float(self._remote.FindNode("BlackLevel").Value()))
@@ -241,7 +241,7 @@ class CalibratedCameraWorker(CameraWorker):
                 self._validate_calibration()
             except ValueError as exc:
                 self._processor = self._default_processor
-                self._ndvi_bounds = self._cvi_bounds = None
+                self._tvi_bounds = None
                 self.calibration_changed.emit(False, str(exc))
 
     def _camera_closed(self):
