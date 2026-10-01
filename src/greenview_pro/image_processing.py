@@ -95,6 +95,7 @@ class FrameProcessor:
         self._tvi_bounds = None
         self._bounds_update_interval = 10
         self._bounds_smoothing = np.float32(0.25)
+        self.tvi_adaptive = True
         self.temporal_enabled = True
         self.temporal_weight = float(TEMPORAL_WEIGHT)
         self.reset_temporal()
@@ -143,6 +144,11 @@ class FrameProcessor:
         self.percentiles[index] = (low, high)
         setattr(self, f"_{index}_bounds", None)
 
+    def set_tvi_adaptive(self, enabled):
+        if not isinstance(enabled, bool):
+            raise ValueError("TVI adaptive contrast requires a boolean")
+        self.tvi_adaptive = enabled
+
     def render(self, raw, maximum_size=DEFAULT_PREVIEW_SIZE):
         if raw.ndim != 2 or min(raw.shape) < 2:
             raise RuntimeError(
@@ -184,9 +190,13 @@ class FrameProcessor:
             for index, name in enumerate(("R", "G", "NIR"))
         }
         indices = self.processor.process_channels(channels).indices
-        self._normalization_frame += 1
         old = self._tvi_bounds
-        if old is None or self._normalization_frame % self._bounds_update_interval == 0:
+        if self.tvi_adaptive:
+            self._normalization_frame += 1
+        if old is None or (
+            self.tvi_adaptive
+            and self._normalization_frame % self._bounds_update_interval == 0
+        ):
             new = full_percentile_bounds(indices["tvi"], *self.percentiles["tvi"])
             if old is None:
                 self._tvi_bounds = new

@@ -36,6 +36,19 @@ def test_green_reference_averages_both_green_sites():
         channel_mean(frame, (1, 0, 2, 2), "RGGB", "G")
 
 
+def test_means_ignore_other_bayer_sites_and_pixels_outside_roi():
+    frame = np.full((8, 10), 240, dtype=np.uint16)
+    x, y, width, height = 2, 2, 4, 4
+    frame[y:y+height, x:x+width] = 200
+    frame[y:y+height:2, x:x+width:2] = 10  # first green sub-grid: GRBG
+    frame[y+1:y+height:2, x+1:x+width:2] = 30  # second green sub-grid
+    frame[y:y+height:2, x+1:x+width:2] = 50  # red
+    frame[y+1:y+height:2, x:x+width:2] = 70  # IR
+    assert channel_mean(frame, (x, y, width, height), "GRBG", "G") == 20
+    assert channel_mean(frame, (x, y, width, height), "GRBG", "R") == 50
+    assert channel_mean(frame, (x, y, width, height), "GRBG", "B") == 70
+
+
 def test_roi_snaps_inside_selection_to_even_coordinates():
     assert aligned_roi((3.1, 2.2), (11.9, 9.8), (12, 14)) == (4, 4, 6, 4)
     assert aligned_roi((-8, -4), (18, 18), (11, 13)) == (0, 0, 12, 10)
@@ -129,10 +142,14 @@ def test_window_guides_operator_through_every_confirmation(monkeypatch, capsys):
 
     monkeypatch.setattr(widgets, "Button", FakeButton)
     monkeypatch.setattr(widgets, "RectangleSelector", FakeSelector)
-    preview = np.full((8, 8), 10, dtype=np.uint8)
-    green = np.full((8, 8), 50, dtype=np.uint8)
-    red = np.full((8, 8), 51, dtype=np.uint8)
-    ir = np.full((8, 8), 49, dtype=np.uint8)
+    preview = np.full((8, 8), 240, dtype=np.uint8)
+    green = preview.copy()
+    red = preview.copy()
+    ir = preview.copy()
+    preview[2:6, 2:6] = 10
+    green[2:6, 2:6] = 50
+    red[2:6, 2:6] = 51
+    ir[2:6, 2:6] = 49
     camera = FakeCamera(*([preview] * 11 + [green] * 11 + [red] * 11 + [ir] * 11))
     camera.white_level = 255
 
@@ -141,10 +158,19 @@ def test_window_guides_operator_through_every_confirmation(monkeypatch, capsys):
         selectors[0].select(SimpleNamespace(xdata=1.1, ydata=1.1),
                             SimpleNamespace(xdata=6.9, ydata=6.9))
         confirm.click(None)
+        image = plt.gcf().axes[0].images[0]
+        assert image.get_array().shape == (4, 4)
+        assert tuple(image.get_extent()) == (1.5, 5.5, 5.5, 1.5)
         capture.click(None)
+        assert image.get_array().shape == (4, 4)
+        assert np.all(image.get_array() == 50)
         capture.click(None)
+        assert image.get_array().shape == (4, 4)
+        assert np.all(image.get_array() == 51)
         confirm.click(None)
         capture.click(None)
+        assert image.get_array().shape == (4, 4)
+        assert np.all(image.get_array() == 49)
         confirm.click(None)
 
     monkeypatch.setattr(plt, "show", simulate_operator)

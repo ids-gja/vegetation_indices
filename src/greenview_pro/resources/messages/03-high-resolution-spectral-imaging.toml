@@ -2,13 +2,13 @@ title = "HIGH RESOLUTION SPECTRAL IMAGING"
 subtitle = "Based on a standard uEye XCP camera with AR2020 image sensor."
 
 [[facts]]
-title = "20 MP SENSOR"
+title = "20 MP sensor"
 detail = "High NIR sensitivity"
 
 [[facts]]
-title = "HIGH SPATIAL RESOLUTION"
+title = "High spatial resolution"
 detail = "Capture fine plant structures and details"
 
 [[facts]]
-title = "SPECTRAL DATA"
+title = "Spectral data"
 detail = "Acquire green, red and near-infrared information"

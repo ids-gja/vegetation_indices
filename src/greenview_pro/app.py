@@ -234,6 +234,7 @@ class MainWindow(QMainWindow):
     percentiles_requested = Signal(str, int, int)
     ndvi_bounds_requested = Signal(float, float)
     temporal_requested = Signal(bool, float)
+    tvi_adaptive_requested = Signal(bool)
     preview_size_requested = Signal(object)
 
     def __init__(self):
@@ -271,6 +272,7 @@ class MainWindow(QMainWindow):
         self.percentiles_requested.connect(self.worker.set_percentiles)
         self.ndvi_bounds_requested.connect(self.worker.set_ndvi_bounds)
         self.temporal_requested.connect(self.worker.set_temporal_filter)
+        self.tvi_adaptive_requested.connect(self.worker.set_tvi_adaptive)
         self.preview_size_requested.connect(self.worker.set_preview_sizes)
         self.worker.recoverable_error.connect(self.show_camera_error)
         self.worker.set_temporal_filter(self.temporal_enabled, self.temporal_weight)
@@ -913,6 +915,7 @@ class MainWindow(QMainWindow):
         self.camera_status.setText(text)
 
     def enter_demo(self):
+        self.tvi_adaptive_requested.emit(False)
         self.max_fps_requested.emit()
         self.demo_mode = True
         self._display_view_index = 0
@@ -928,6 +931,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(120, self._refresh_demo_views)
 
     def exit_demo(self):
+        self.tvi_adaptive_requested.emit(True)
         self.demo_mode = False
         self.marketing_timer.stop()
         self.message_progress_timer.stop()

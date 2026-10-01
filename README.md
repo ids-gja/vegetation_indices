@@ -47,6 +47,9 @@ white-target calibration action. Exposure and contrast remain in the top bar:
 separate NDVI and TVI contrast bars are stacked vertically. NDVI uses absolute
 index scores from -1.00 to +1.00 in 0.01 steps (defaulting to the full range);
 TVI uses image percentiles from 0 to 100 (defaulting to 30% and 80%).
+TVI display bounds update periodically in the normal preview and remain fixed
+while fullscreen presentation is active. If presentation starts before the
+first processed frame, that frame establishes the bounds.
 Each bar has two grips; dragging the selected area moves both bounds together.
 A gap of at least 0.02 for NDVI or two percentage points for TVI is preserved.
 Camera and calibration status messages occupy a separate row so they cannot

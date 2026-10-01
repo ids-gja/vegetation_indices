@@ -193,6 +193,38 @@ def test_temporal_filter_can_be_disabled_and_weight_adjusted():
             frame.set_temporal_filter(enabled, weight)
 
 
+def test_tvi_bounds_freeze_in_presentation_and_resume_updating_in_preview():
+    frame = FrameProcessor()
+    frame.set_temporal_filter(False, 0.25)
+    raw = np.tile(
+        np.array([[40, 20, 50, 20], [30, 40, 30, 80]], dtype=np.uint16), (4, 4)
+    )
+    changed = raw.copy()
+    changed[1::2, 1::4] = 100
+    frame.render(raw, (8, 8))
+    preview_bounds = frame._tvi_bounds
+
+    frame.set_tvi_adaptive(False)
+    for _ in range(12):
+        frame.render(changed, (8, 8))
+    assert frame._tvi_bounds == preview_bounds
+
+    frame.set_tvi_adaptive(True)
+    for _ in range(10):
+        frame.render(changed, (8, 8))
+    assert frame._tvi_bounds != preview_bounds
+
+
+def test_frozen_tvi_bounds_initialize_if_presentation_starts_before_first_frame():
+    frame = FrameProcessor()
+    frame.set_tvi_adaptive(False)
+    raw = np.tile(
+        np.array([[40, 20, 50, 20], [30, 40, 30, 80]], dtype=np.uint16), (4, 4)
+    )
+    frame.render(raw, (8, 8))
+    assert frame._tvi_bounds is not None
+
+
 def test_superpixel_area_scaling_reduces_an_isolated_index_speckle():
     from ndvi_processing import bayer_superpixels, resize_superpixels
 

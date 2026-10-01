@@ -32,9 +32,8 @@ def aligned_roi(start, end, shape):
     return x0, y0, x1 - x0, y1 - y0
 
 
-def channel_mean(frame, roi, cfa, channel):
-    """Measure only matching raw sensor sites, without demosaicing."""
-    cfa = validate_cfa(cfa)
+def roi_pixels(frame, roi):
+    """Return only the aligned RAW pixels inside the selected sensor ROI."""
     image = np.asarray(frame)
     if image.ndim != 2:
         raise ValueError("Expected a 2D RAW Bayer frame")
@@ -47,15 +46,20 @@ def channel_mean(frame, roi, cfa, channel):
             or y + height > image.shape[0]
     ):
         raise ValueError("ROI must be even-aligned and inside the RAW frame")
+    return image[y:y + height, x:x + width]
+
+
+def channel_mean(frame, roi, cfa, channel):
+    """Average only this channel's Bayer sub-grids inside the selected ROI."""
+    cfa = validate_cfa(cfa)
     if channel not in ("R", "G", "B"):
         raise ValueError(f"Unknown CFA channel: {channel}")
-    region = image[y: y + height, x: x + width]
-    values = [
-        region[index // 2:: 2, index % 2:: 2]
-        for index, site in enumerate(cfa)
-        if site == channel
+    region = roi_pixels(frame, roi)
+    site_means = [
+        np.mean(region[index // 2::2, index % 2::2], dtype=np.float64)
+        for index, site in enumerate(cfa) if site == channel
     ]
-    return float(np.mean(values, dtype=np.float64))
+    return float(np.mean(site_means))
 
 
 class CalibrationGuide:
@@ -172,6 +176,14 @@ def run_guide(camera, cfa):
         status.set_text(prompts[stage] + (f"\n{message}" if message else ""))
         fig.canvas.draw_idle()
 
+    def show_selected_roi():
+        x, y, width, height = guide.roi
+        image.set_data(roi_pixels(guide.frame, guide.roi))
+        image.set_extent((x - 0.5, x + width - 0.5,
+                          y + height - 0.5, y - 0.5))
+        ax.set_xlim(x - 0.5, x + width - 0.5)
+        ax.set_ylim(y + height - 0.5, y - 0.5)
+
     def on_select(eclick, erelease):
         if guide.stage != "roi" or None in (eclick.xdata, eclick.ydata,
                                             erelease.xdata, erelease.ydata):
@@ -203,11 +215,11 @@ def run_guide(camera, cfa):
                 instruction("Preview refreshed. Select and confirm the slab ROI.")
             elif guide.stage == "green":
                 guide.capture_green()
-                image.set_data(guide.frame)
+                show_selected_roi()
                 instruction(f"Green reference: {guide.reference:.2f}; ROI: {guide.roi}.")
             else:
                 mean = guide.capture_channel()
-                image.set_data(guide.frame)
+                show_selected_roi()
                 name = "Red" if guide.stage == "red" else "IR (blue CFA site)"
                 instruction(f"{name}: {mean:.2f}  |  Green reference: {guide.reference:.2f}"
                             f"  |  Difference: {mean - guide.reference:+.2f}")
@@ -219,6 +231,10 @@ def run_guide(camera, cfa):
             if guide.stage == "roi":
                 guide.confirm_roi(selection[0])
                 selector.set_active(False)
+                if outline[0] is not None:
+                    outline[0].remove()
+                    outline[0] = None
+                show_selected_roi()
                 instruction(f"ROI confirmed: {guide.roi}. Now set G to maximum; R and IR off.")
             else:
                 guide.confirm_channel()

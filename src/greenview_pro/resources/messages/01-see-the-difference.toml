@@ -2,13 +2,13 @@ title = "SEE THE DIFFERENCE"
 subtitle = "Natural vegetation and artificial grass appear similar in the visible image."
 
 [[facts]]
-title = "RGB IMAGE"
-detail = "Plant and artificial grass look alike"
+title = "Instant contrast"
+detail = "Spectral information reveals the difference"
 
 [[facts]]
-title = "NDVI IMAGE"
+title = "NDVI"
 detail = "Living vegetation becomes immediately visible"
 
 [[facts]]
-title = "INSTANT CONTRAST"
-detail = "Spectral information reveals the difference"
+title = "RGB"
+detail = "Plant and artificial grass look alike"

@@ -53,6 +53,7 @@ class CameraWorker(QThread):
         self._latest_lock = Lock()
         self._settings_lock = Lock()
         self._pending_temporal = None
+        self._pending_tvi_adaptive = None
         self._pending_frame_rate = False
         self._maximize_on_reconnect = False
         self._preview_size = DEFAULT_PREVIEW_SIZE
@@ -112,6 +113,13 @@ class CameraWorker(QThread):
         else:
             with self._settings_lock:
                 self._pending_temporal = (enabled, weight)
+
+    @Slot(bool)
+    def set_tvi_adaptive(self, enabled):
+        if not isinstance(enabled, bool):
+            raise ValueError("TVI adaptive contrast requires a boolean")
+        with self._settings_lock:
+            self._pending_tvi_adaptive = enabled
 
     @Slot(int)
     def set_exposure(self, value):
@@ -273,8 +281,12 @@ class CameraWorker(QThread):
         with self._settings_lock:
             pending_temporal = self._pending_temporal
             self._pending_temporal = None
+            pending_tvi_adaptive = self._pending_tvi_adaptive
+            self._pending_tvi_adaptive = None
         if pending_temporal is not None:
             self._frame_processor.set_temporal_filter(*pending_temporal)
+        if pending_tvi_adaptive is not None:
+            self._frame_processor.set_tvi_adaptive(pending_tvi_adaptive)
         if self._temporal_warmup_frames:
             self._frame_processor.reset_temporal()
             self._temporal_warmup_frames -= 1

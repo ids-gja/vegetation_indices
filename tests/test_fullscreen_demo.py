@@ -36,6 +36,31 @@ def test_fullscreen_requests_faster_fps_without_changing_preview_exposure(monkey
         window.close()
 
 
+def test_presentation_freezes_tvi_contrast_and_preview_restores_adaptation(monkeypatch):
+    monkeypatch.setattr(app.CameraWorker, "start", lambda self: None)
+    application = QApplication.instance() or QApplication([])
+    window = app.MainWindow()
+    try:
+        raw = np.tile(
+            np.array([[40, 20, 50, 20], [30, 40, 30, 80]], dtype=np.uint16),
+            (4, 4),
+        )
+        changed = raw.copy()
+        changed[1::2, 1::4] = 100
+        window.worker._process(raw, 0)
+        preview_bounds = window.worker._tvi_bounds
+        window.enter_demo()
+        for _ in range(12):
+            window.worker._process(changed, 0)
+        assert window.worker._tvi_bounds == preview_bounds
+        window.exit_demo()
+        for _ in range(10):
+            window.worker._process(changed, 0)
+        assert window.worker._tvi_bounds != preview_bounds
+    finally:
+        window.close()
+
+
 def wait_for_demo(condition):
     for _ in range(100):
         if condition():
