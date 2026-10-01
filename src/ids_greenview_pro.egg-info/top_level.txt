@@ -1,3 +1,0 @@
-calibration
-greenview_pro
-ndvi_processing
